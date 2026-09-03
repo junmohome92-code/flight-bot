@@ -58,7 +58,8 @@ app = FastAPI(title="Flight Bot", version="0.1.0", lifespan=lifespan)
 async def health():
     return {
         "ok": True,
-        "provider": "serpapi" if settings.serpapi_api_key else "not-configured",
+        "provider": "serpapi" if settings.serpapi_keys else "not-configured",
+        "serpapi_key_count": len(settings.serpapi_keys),
         "telegram": bool(settings.telegram_bot_token),
         "discord": bool(settings.discord_bot_token),
         "kakao_skill": True,
