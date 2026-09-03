@@ -32,26 +32,19 @@ def parse_krw_price(text: str | None) -> int | None:
     if not text:
         return None
     match = _KRW_RE.search(text) or _WON_ARIA_RE.search(text)
-    if not match:
-        return None
-    return int(match.group(1).replace(",", ""))
+    return int(match.group(1).replace(",", "")) if match else None
 
 
 def parse_all_krw_prices(text: str | None) -> list[int]:
     if not text:
         return []
-    values = [int(value.replace(",", "")) for value in _KRW_RE.findall(text)]
-    values += [int(value.replace(",", "")) for value in _WON_ARIA_RE.findall(text)]
+    values = [int(v.replace(",", "")) for v in _KRW_RE.findall(text)]
+    values.extend(int(v.replace(",", "")) for v in _WON_ARIA_RE.findall(text))
     return sorted(set(values))
 
 
 class GoogleFlightsPlaywrightProvider:
-    """Google Flights rendered-browser provider.
-
-    fast-flights only generates Google's own `tfs` query URL. Chromium opens
-    the real Google Flights UI and the provider reads prices from the rendered
-    page. Separate-ticket/self-transfer itineraries stay enabled.
-    """
+    """Render Google Flights in Chromium and extract the visible lowest price."""
 
     name = "google-playwright"
 
@@ -91,8 +84,7 @@ class GoogleFlightsPlaywrightProvider:
             hide_separate_and_self_transfer=False,
         )
         url = query.url()
-        joiner = "&" if "?" in url else "?"
-        return f"{url}{joiner}gl={self.settings.google_gl}"
+        return f"{url}{'&' if '?' in url else '?'}gl={self.settings.google_gl}"
 
     def build_search_url(self, slot: WatchSlot) -> str:
         return self._query_builder(slot)
@@ -127,14 +119,11 @@ class GoogleFlightsPlaywrightProvider:
         if await page.locator("iframe[src*='recaptcha'], div.g-recaptcha, div#recaptcha").count():
             raise CaptchaDetectedError("Google reCAPTCHA detected")
 
-    async def _wait_results(self, page: Page, slot: WatchSlot) -> None:
-        """Wait on stable semantic text, not Google's frequently changing row DOM."""
+    async def _wait_results(self, page: Page) -> None:
+        """Use stable visible section text rather than Google's volatile row DOM."""
         try:
             await page.get_by_text("Departing flights", exact=False).first.wait_for(
                 state="visible", timeout=self.settings.browser_timeout_ms
-            )
-            await page.get_by_text(re.compile(rf"{re.escape(slot.origin)}[–-]{re.escape(slot.destination)}")).first.wait_for(
-                state="visible", timeout=10_000
             )
         except PlaywrightTimeoutError as exc:
             body = (await page.locator("body").inner_text())[:1500]
@@ -160,12 +149,8 @@ class GoogleFlightsPlaywrightProvider:
             except Exception:
                 pass
 
-    async def _find_price_anchor(self, page: Page, price: int) -> Locator | None:
-        formatted = f"₩{price:,}"
+    async def _price_anchor(self, page: Page, price: int) -> Locator | None:
         candidates = page.get_by_text(re.compile(rf"₩\s*{price:,}"))
-        if await candidates.count():
-            return candidates.first
-        candidates = page.get_by_text(formatted, exact=False)
         return candidates.first if await candidates.count() else None
 
     async def _nearest_clickable(self, anchor: Locator | None) -> Locator | None:
@@ -194,7 +179,7 @@ class GoogleFlightsPlaywrightProvider:
             raise ProviderError("Google Flights loaded results but no KRW price was found")
 
         price = min(prices)
-        anchor = await self._find_price_anchor(page, price)
+        anchor = await self._price_anchor(page, price)
         clickable = await self._nearest_clickable(anchor)
         row_text = ""
         if clickable is not None:
@@ -204,22 +189,18 @@ class GoogleFlightsPlaywrightProvider:
                 pass
         if not row_text and anchor is not None:
             try:
-                parent = anchor.locator("xpath=ancestor::div[1]")
-                row_text = await parent.inner_text()
+                row_text = await anchor.locator("xpath=ancestor::div[1]").inner_text()
             except Exception:
                 pass
 
         lower = row_text.lower()
-        is_nonstop = "nonstop" in lower
-        if slot.nonstop and row_text and not is_nonstop:
-            # Query already requests nonstop. This is only a defensive guard.
-            raise ProviderError("Google Flights returned a non-nonstop candidate for a nonstop slot")
+        if slot.nonstop and row_text and "nonstop" not in lower:
+            raise ProviderError("nonstop slot resolved to a non-nonstop candidate")
 
-        flight_numbers = " / ".join(dict.fromkeys(_FLIGHT_NO_RE.findall(row_text))) or None
         airline = None
-        lines = [line.strip() for line in row_text.splitlines() if line.strip()]
-        for line in lines:
-            if any(token in line.lower() for token in ("airlines", "airways", "air", "aero", "jeju", "t'way", "eastar", "jin")):
+        for line in (line.strip() for line in row_text.splitlines() if line.strip()):
+            low = line.lower()
+            if any(token in low for token in ("airlines", "airways", "aero", "jeju", "t'way", "eastar", "jin air", "korean air")):
                 airline = line
                 break
 
@@ -227,42 +208,44 @@ class GoogleFlightsPlaywrightProvider:
             "locator": clickable,
             "price": price,
             "airline": airline,
-            "flight_numbers": flight_numbers,
-            "nonstop": is_nonstop if row_text else None,
+            "flight_numbers": " / ".join(dict.fromkeys(_FLIGHT_NO_RE.findall(row_text))) or None,
+            "nonstop": "nonstop" in lower if row_text else None,
             "separate_ticket": "separate ticket" in lower or "self-transfer" in lower,
             "text": row_text[:2000],
             "page_price_count": len(prices),
         }
 
-    async def _verify_booking(self, page: Page, best: dict, slot: WatchSlot) -> int | None:
+    async def _verify_booking(self, page: Page, best: dict) -> int | None:
+        """Best-effort final-price verification; fail closed if UI navigation changes."""
         locator = best.get("locator")
         if locator is None:
             return None
         try:
             await locator.click(timeout=7000)
-            await page.wait_for_timeout(1400)
+            await page.wait_for_timeout(1500)
             await self._check_captcha(page)
-            await self._wait_results(page, slot)
-
-            # Return-flight page: use the cheapest visible KRW price to choose a row.
-            return_best = await self._extract_best(page, slot)
-            return_locator = return_best.get("locator")
+            await self._wait_results(page)
+            body = await page.locator("body").inner_text()
+            prices = parse_all_krw_prices(body)
+            if not prices:
+                return None
+            return_price = min(prices)
+            anchor = await self._price_anchor(page, return_price)
+            return_locator = await self._nearest_clickable(anchor)
             if return_locator is None:
                 return None
             await return_locator.click(timeout=7000)
-            await page.wait_for_timeout(1600)
+            await page.wait_for_timeout(1800)
             await self._check_captcha(page)
-
             body = await page.locator("body").inner_text()
-            lowest_idx = body.lower().find("lowest total price")
-            if lowest_idx >= 0:
-                nearby = body[lowest_idx:lowest_idx + 1500]
-                prices = parse_all_krw_prices(nearby)
-                if prices:
-                    return min(prices)
-
-            prices = parse_all_krw_prices(body)
-            return min(prices) if prices else None
+            marker = body.lower().find("lowest total price")
+            if marker >= 0:
+                nearby = body[marker:marker + 1500]
+                nearby_prices = parse_all_krw_prices(nearby)
+                if nearby_prices:
+                    return min(nearby_prices)
+            all_prices = parse_all_krw_prices(body)
+            return min(all_prices) if all_prices else None
         except Exception:
             return None
 
@@ -282,14 +265,14 @@ class GoogleFlightsPlaywrightProvider:
             playwright, browser, context, page = await self._setup()
             await page.goto(self.build_search_url(slot), wait_until="domcontentloaded")
             await self._check_captcha(page)
-            await self._wait_results(page, slot)
+            await self._wait_results(page)
             best = await self._extract_best(page, slot)
             await self._debug_screenshot(page, f"slot-{slot.id}-results.png")
 
             verified_price = None
             verified = False
             if verify_below_price is not None and best["price"] <= verify_below_price:
-                verified_price = await self._verify_booking(page, best, slot)
+                verified_price = await self._verify_booking(page, best)
                 if verified_price is not None:
                     verified = True
                     await self._debug_screenshot(page, f"slot-{slot.id}-booking.png")
@@ -306,7 +289,6 @@ class GoogleFlightsPlaywrightProvider:
                 price_verified=verified,
                 airline=best["airline"],
                 outbound_flight=best["flight_numbers"],
-                inbound_flight=None,
                 carry_on="Google Flights 상세 확인 필요",
                 checked_baggage="정보 확인 불가" if slot.checked_bag == 0 else f"요청 기준 {slot.checked_bag}개",
                 booking_provider="Google Flights" if verified else None,
