@@ -31,7 +31,9 @@ jobs:
       - name: Live Google Flights CJJ-TPE 2026-09-18..20
         env:
           BROWSER_DEBUG_DIR: artifacts/live-smoke
-        run: python scripts/live_smoke.py | tee artifacts-live-result.txt
+        run: |
+          set -o pipefail
+          python scripts/live_smoke.py | tee artifacts-live-result.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
