@@ -17,8 +17,11 @@ jobs:
       - run: pip install -e '.[dev]'
       - run: pytest -q
 
+  # GitHub-hosted/Azure IPs can load the exact route but Google may return
+  # "Price unavailable" for every fare. Keep this as a manual diagnostic,
+  # while real-price acceptance is performed from WSL/home-server IPs.
   cjj-tpe-live-smoke:
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/playwright-v2' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
