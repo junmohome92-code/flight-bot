@@ -1,0 +1,14 @@
+services:
+  flight-bot:
+    build: .
+    container_name: flight-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - flight_bot_data:/data
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+
+volumes:
+  flight_bot_data:
