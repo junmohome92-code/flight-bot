@@ -51,12 +51,6 @@ git clone https://github.com/junmohome92-code/flight-bot.git
 
 # 2) 프로젝트 폴더 이동
 # cd = change directory
-a cd_placeholder
-```
-
-위 두 번째 줄은 아래 명령을 사용하세요.
-
-```bash
 cd flight-bot
 
 # 3) 환경변수 파일 생성
