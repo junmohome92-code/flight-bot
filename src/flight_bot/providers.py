@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
@@ -13,6 +14,31 @@ class ProviderError(RuntimeError):
     pass
 
 
+class RoundRobinKeyPool:
+    """Concurrency-safe round-robin key selector.
+
+    Each outbound SerpApi HTTP request consumes the next configured key:
+    key1 -> key2 -> ... -> keyN -> key1.
+    """
+
+    def __init__(self, keys: list[str]):
+        self._keys = [key for key in keys if key]
+        self._index = 0
+        self._lock = asyncio.Lock()
+
+    @property
+    def size(self) -> int:
+        return len(self._keys)
+
+    async def next_key(self) -> str:
+        if not self._keys:
+            raise ProviderError("SERPAPI_API_KEYS가 설정되지 않았습니다.")
+        async with self._lock:
+            key = self._keys[self._index]
+            self._index = (self._index + 1) % len(self._keys)
+            return key
+
+
 class SerpApiProvider:
     """Google Flights via SerpApi.
 
@@ -24,11 +50,11 @@ class SerpApiProvider:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.key_pool = RoundRobinKeyPool(settings.serpapi_keys)
 
     async def _get(self, params: dict[str, Any]) -> dict[str, Any]:
-        if not self.settings.serpapi_api_key:
-            raise ProviderError("SERPAPI_API_KEY가 설정되지 않았습니다.")
-        params = {**params, "api_key": self.settings.serpapi_api_key, "engine": "google_flights"}
+        api_key = await self.key_pool.next_key()
+        params = {**params, "api_key": api_key, "engine": "google_flights"}
         async with httpx.AsyncClient(timeout=45) as client:
             response = await client.get(self.settings.serpapi_base_url, params=params)
             response.raise_for_status()
