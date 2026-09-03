@@ -61,6 +61,18 @@ docker compose logs -f        # 실시간 로그 확인
 
 Chromium의 `/dev/shm` 부족을 피하기 위해 Compose에 `shm_size: 1gb`를 지정했습니다. 브라우저는 검색마다 하나만 실행하며 슬롯은 순차 처리합니다.
 
+## Windows 테스트
+
+저장소 안의 **`flight-bot - test win`** 디렉토리는 Windows 10/11 PowerShell 전용 테스트 하네스입니다. 실제 봇 코드를 복제하지 않고 현재 프로젝트 소스를 그대로 설치해 Windows 호환성을 확인합니다.
+
+```text
+01-setup-and-unit-test.cmd       → .venv-win 생성 + 의존성/Chromium 설치 + pytest
+02-live-cjj-tpe-visible.cmd      → Chromium 창을 띄워 CJJ↔TPE 실가격 테스트
+03-live-cjj-tpe-headless.cmd     → 같은 실가격 테스트를 headless로 실행
+```
+
+GitHub Actions에도 `windows-latest` unit + Chromium launch 검증을 추가했습니다. 실제 Google 가격은 hosted runner가 아닌 사용자 Windows/WSL/홈서버 IP에서 최종 확인합니다.
+
 ## 환경설정
 
 ```env
@@ -97,7 +109,7 @@ REQUIRE_VERIFIED_ALERTS=true
 
 ### 검증 결과
 
-GitHub-hosted Ubuntu/Azure runner에서는 Chromium이 정확한 CJJ→TPE, 2026-09-18~20 검색 결과와 항공편 목록까지 정상 로드하는 것을 확인했습니다. 그러나 해당 데이터센터 IP/session에는 Google이 모든 운임을 `Price unavailable`로 반환했습니다. 따라서 **실제 가격 acceptance test는 WSL 또는 최종 Ubuntu 홈서버의 일반 인터넷 회선에서 실행해야 합니다.** 이 상황은 코드에서 `PriceUnavailableError`로 명시적으로 분류하며 가짜 가격을 만들지 않습니다.
+GitHub-hosted Ubuntu/Azure runner에서는 Chromium이 정확한 CJJ→TPE, 2026-09-18~20 검색 결과와 항공편 목록까지 정상 로드하는 것을 확인했습니다. 그러나 해당 데이터센터 IP/session에는 Google이 모든 운임을 `Price unavailable`로 반환했습니다. 따라서 **실제 가격 acceptance test는 Windows/WSL 또는 최종 Ubuntu 홈서버의 일반 인터넷 회선에서 실행해야 합니다.** 이 상황은 코드에서 `PriceUnavailableError`로 명시적으로 분류하며 가짜 가격을 만들지 않습니다.
 
 WSL/Ubuntu에서 실제 가격 검증:
 
@@ -108,9 +120,9 @@ pytest -q                                             # 단위 테스트
 BROWSER_DEBUG_DIR=artifacts/live-smoke python scripts/live_smoke.py
 ```
 
-마지막 명령은 위 CJJ↔TPE 조건을 실제 Google Flights에 조회하고, 가능하면 Booking 가격 검증까지 진행합니다. 성공 시 JSON 결과를 출력하고 스크린샷을 `artifacts/live-smoke/`에 남깁니다.
+Windows에서는 `flight-bot - test win` 폴더의 CMD 파일을 순서대로 실행하면 됩니다.
 
-GitHub Actions의 `cjj-tpe-live-smoke`는 데이터센터 IP 진단용이라 **수동 `workflow_dispatch`에서만 실행**합니다. 일반 push/PR CI는 안정적인 unit test만 blocking gate로 사용합니다.
+GitHub Actions의 `cjj-tpe-live-smoke`는 데이터센터 IP 진단용이라 **수동 `workflow_dispatch`에서만 실행**합니다. 일반 push/PR CI는 Linux + Windows unit test를 blocking gate로 사용합니다.
 
 ## 테스트
 
