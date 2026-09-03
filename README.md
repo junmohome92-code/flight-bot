@@ -114,6 +114,8 @@ pytest -q
 
 테스트 범위: KRW 가격 파싱, 고정 슬롯 1/2/3, pause 점유, delete 후 번호 재사용, SQLite WAL, 목표가 latch/re-arm, ALERTED 상태의 상세검증 억제.
 
+CI는 unit test와 위 CJJ↔TPE 라이브 스모크를 별도 job으로 실행합니다.
+
 ## 주의사항
 
 Google Flights는 공개 개발자 API가 아닙니다. UI/DOM 변경, CAPTCHA, IP 제한으로 scraper가 깨질 수 있습니다. Provider 로직과 봇/DB/알림 로직을 분리해 DOM 변경 시 `providers.py`를 집중 수정할 수 있게 했습니다.
