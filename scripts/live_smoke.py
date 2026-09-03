@@ -10,12 +10,34 @@ from flight_bot.models import WatchSlot
 from flight_bot.providers import GoogleFlightsPlaywrightProvider
 
 
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 async def main() -> None:
-    settings = Settings(browser_headless=True, browser_debug_dir=os.getenv("BROWSER_DEBUG_DIR", "artifacts/live-smoke"),
-                        google_language="en", google_currency="KRW", google_gl="kr")
-    slot = WatchSlot(id=1, owner_platform="smoke", owner_id="smoke", origin="CJJ", destination="TPE",
-                     depart_date="2026-09-18", return_date="2026-09-20", nonstop=False,
-                     checked_bag=0, enabled=True, target_price=500_000)
+    settings = Settings(
+        browser_headless=env_bool("BROWSER_HEADLESS", True),
+        browser_debug_dir=os.getenv("BROWSER_DEBUG_DIR", "artifacts/live-smoke"),
+        google_language="en",
+        google_currency="KRW",
+        google_gl="kr",
+    )
+    slot = WatchSlot(
+        id=1,
+        owner_platform="smoke",
+        owner_id="smoke",
+        origin="CJJ",
+        destination="TPE",
+        depart_date="2026-09-18",
+        return_date="2026-09-20",
+        nonstop=False,
+        checked_bag=0,
+        enabled=True,
+        target_price=500_000,
+    )
     offer = await GoogleFlightsPlaywrightProvider(settings).search(slot, verify_below_price=500_000)
     payload = asdict(offer)
     if payload.get("fetched_at"):

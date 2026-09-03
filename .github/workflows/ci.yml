@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  unit:
+  unit-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,9 +17,21 @@ jobs:
       - run: pip install -e '.[dev]'
       - run: pytest -q
 
-  # GitHub-hosted/Azure IPs can load the exact route but Google may return
-  # "Price unavailable" for every fare. Keep this as a manual diagnostic,
-  # while real-price acceptance is performed from WSL/home-server IPs.
+  unit-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e '.[dev]'
+      - run: python -m pytest -q
+      - name: Verify Windows Playwright Chromium install and launch
+        shell: pwsh
+        run: |
+          python -m playwright install chromium
+          python -c "import asyncio; from playwright.async_api import async_playwright; exec('async def t():\n    p=await async_playwright().start()\n    b=await p.chromium.launch(headless=True)\n    print(await b.version())\n    await b.close()\n    await p.stop()\nasyncio.run(t())')"
+
   cjj-tpe-live-smoke:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
