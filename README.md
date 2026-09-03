@@ -95,15 +95,22 @@ REQUIRE_VERIFIED_ALERTS=true
 경유/별도티켓: 허용
 ```
 
-로컬/WSL에서:
+### 검증 결과
+
+GitHub-hosted Ubuntu/Azure runner에서는 Chromium이 정확한 CJJ→TPE, 2026-09-18~20 검색 결과와 항공편 목록까지 정상 로드하는 것을 확인했습니다. 그러나 해당 데이터센터 IP/session에는 Google이 모든 운임을 `Price unavailable`로 반환했습니다. 따라서 **실제 가격 acceptance test는 WSL 또는 최종 Ubuntu 홈서버의 일반 인터넷 회선에서 실행해야 합니다.** 이 상황은 코드에서 `PriceUnavailableError`로 명시적으로 분류하며 가짜 가격을 만들지 않습니다.
+
+WSL/Ubuntu에서 실제 가격 검증:
 
 ```bash
-pip install -e .
-python -m playwright install chromium
+pip install -e '.[dev]'                              # 프로젝트 + 테스트 의존성 설치
+python -m playwright install --with-deps chromium    # Chromium 및 Linux 의존성 설치
+pytest -q                                             # 단위 테스트
 BROWSER_DEBUG_DIR=artifacts/live-smoke python scripts/live_smoke.py
 ```
 
-GitHub Actions의 `cjj-tpe-live-smoke` job도 같은 조건으로 실제 Google Flights를 호출합니다. Google이 CI IP를 CAPTCHA로 막으면 테스트는 실패하고 스크린샷 artifact를 남깁니다. 이 경우 WSL/Ubuntu 서버에서 동일 스크립트로 재검증합니다.
+마지막 명령은 위 CJJ↔TPE 조건을 실제 Google Flights에 조회하고, 가능하면 Booking 가격 검증까지 진행합니다. 성공 시 JSON 결과를 출력하고 스크린샷을 `artifacts/live-smoke/`에 남깁니다.
+
+GitHub Actions의 `cjj-tpe-live-smoke`는 데이터센터 IP 진단용이라 **수동 `workflow_dispatch`에서만 실행**합니다. 일반 push/PR CI는 안정적인 unit test만 blocking gate로 사용합니다.
 
 ## 테스트
 
@@ -113,8 +120,6 @@ pytest -q
 ```
 
 테스트 범위: KRW 가격 파싱, 고정 슬롯 1/2/3, pause 점유, delete 후 번호 재사용, SQLite WAL, 목표가 latch/re-arm, ALERTED 상태의 상세검증 억제.
-
-CI는 unit test와 위 CJJ↔TPE 라이브 스모크를 별도 job으로 실행합니다.
 
 ## 주의사항
 
