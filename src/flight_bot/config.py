@@ -13,23 +13,21 @@ class Settings(BaseSettings):
     database_path: str = "/data/flight_bot.db"
     timezone: str = "Asia/Seoul"
     check_hours: str = "8,20"
-    max_slots: int = 3
-    cache_minutes: int = 20
 
-    # Preferred: comma-separated N keys. The legacy single-key variable remains
-    # supported so a one-key test deployment can be upgraded without code changes.
-    serpapi_api_keys: str = ""
-    serpapi_api_key: str = ""
-    serpapi_base_url: str = "https://serpapi.com/search.json"
-
-    openrouter_api_key: str = ""
-    openrouter_model: str = "openai/gpt-4.1-mini"
+    # Google Flights / Playwright
+    browser_headless: bool = True
+    browser_timeout_ms: int = 45_000
+    browser_block_assets: bool = True
+    browser_debug_dir: str = ""
+    google_language: str = "en"
+    google_currency: str = "KRW"
+    google_gl: str = "kr"
+    require_verified_alerts: bool = True
 
     telegram_bot_token: str = ""
     telegram_allowed_chat_ids: str = ""
 
     discord_bot_token: str = ""
-    discord_guild_id: str = ""
     discord_allowed_channel_ids: str = ""
 
     kakao_skill_secret: str = ""
@@ -38,18 +36,6 @@ class Settings(BaseSettings):
     @staticmethod
     def _csv_set(value: str) -> set[str]:
         return {item.strip() for item in value.split(",") if item.strip()}
-
-    @staticmethod
-    def _csv_list(value: str) -> list[str]:
-        return [item.strip() for item in value.split(",") if item.strip()]
-
-    @property
-    def serpapi_keys(self) -> list[str]:
-        keys = self._csv_list(self.serpapi_api_keys)
-        if not keys and self.serpapi_api_key.strip():
-            keys = [self.serpapi_api_key.strip()]
-        # Preserve order while silently removing duplicate keys.
-        return list(dict.fromkeys(keys))
 
     @property
     def telegram_chat_ids(self) -> set[str]:
@@ -65,7 +51,10 @@ class Settings(BaseSettings):
 
     @property
     def scheduled_hours(self) -> list[int]:
-        return sorted({int(x.strip()) for x in self.check_hours.split(",") if x.strip()})
+        hours = sorted({int(x.strip()) for x in self.check_hours.split(",") if x.strip()})
+        if any(hour < 0 or hour > 23 for hour in hours):
+            raise ValueError("CHECK_HOURS must contain 0-23 only")
+        return hours
 
 
 @lru_cache

@@ -5,6 +5,10 @@ from datetime import datetime
 from typing import Any
 
 
+ALERT_ARMED = "ARMED"
+ALERTED = "ALERTED"
+
+
 @dataclass(slots=True)
 class WatchSlot:
     id: int
@@ -17,7 +21,14 @@ class WatchSlot:
     nonstop: bool
     checked_bag: int
     enabled: bool
-    last_verified_price: int | None
+    target_price: int
+    alert_state: str = ALERT_ARMED
+    last_observed_price: int | None = None
+    lowest_observed_price: int | None = None
+    last_verified_price: int | None = None
+    last_checked_at: str | None = None
+    last_alerted_price: int | None = None
+    last_alerted_at: str | None = None
     currency: str = "KRW"
 
 
@@ -29,8 +40,8 @@ class FlightOffer:
     depart_date: str
     return_date: str
     total_price: int
-    currency: str
-    price_verified: bool
+    currency: str = "KRW"
+    price_verified: bool = False
     airline: str | None = None
     outbound_flight: str | None = None
     inbound_flight: str | None = None
@@ -38,5 +49,7 @@ class FlightOffer:
     checked_baggage: str | None = None
     booking_provider: str | None = None
     booking_url: str | None = None
+    separate_ticket: bool | None = None
+    nonstop: bool | None = None
     raw: dict[str, Any] | None = None
     fetched_at: datetime | None = None

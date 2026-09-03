@@ -5,3 +5,6 @@ __pycache__/
 .venv/
 *.db
 *.sqlite3
+artifacts/
+artifacts-live-result.txt
+/debug/

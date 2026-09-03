@@ -1,179 +1,121 @@
-# Flight Bot
+# Flight Bot v0.2 — Google Flights 직접 감시
 
-Ubuntu 서버에 Docker Compose로 배포하는 항공권 최저가 감시봇입니다.
+개인 Ubuntu/WSL 홈서버에서 Docker로 실행하는 항공권 가격 감시봇입니다.
 
-기준 원칙:
-- AI는 가격을 만들거나 추측하지 않습니다.
-- 실제 가격은 Flight Provider API에서만 가져옵니다.
-- `price_verified=false` 가격은 최저가 알림에 사용하지 않습니다.
-- Telegram / Discord / Kakao가 동일한 SQLite DB와 검색 정책을 공유합니다.
+## v0.2 핵심 변경
 
-## 현재 구현 범위
+SerpApi 중심 구조를 제거했습니다. 실제 Google Flights 브라우저 화면과 가격 차이가 크게 나는 사례(CJJ→TPE, 2026-09-18~20)가 확인되어, 현재 Primary Provider는 **Playwright + headless Chromium으로 Google Flights를 직접 렌더링**합니다.
 
-- Docker / Docker Compose
-- Python 3.12
-- SQLite 영구 볼륨
-- APScheduler (기본 08:00 / 20:00, Asia/Seoul)
-- 최대 3개 감시 슬롯
-- SerpApi Google Flights Provider 골격
-  - 1차 검색
-  - `departure_token`
-  - 귀국편 선택 / `booking_token`
-  - Booking Options 판매 가격 비교
-  - 검증 가격만 최저가 후보로 사용
-- Telegram Bot
-- Discord Bot
-- Kakao 챗봇 Skill webhook
-- `/health` 상태 확인
+`fast-flights`는 가격 공급자가 아니라 Google의 `tfs` 검색 URL을 생성하는 용도로만 사용합니다. Google Flights 검색에서 separate-ticket / self-transfer 결과를 숨기지 않습니다.
 
-> **주의:** SerpApi 실제 응답 구조나 계정 플랜에 따라 Booking Options 필드가 달라질 수 있으므로, API 키 입력 후 실제 응답으로 adapter 검증이 필요합니다.
+## 동작 구조
+
+```text
+APScheduler (기본 08:00 / 20:00 Asia/Seoul)
+  -> Slot 1 -> Chromium 검색 -> DB 저장/목표가 판정
+  -> Slot 2 -> Chromium 검색 -> DB 저장/목표가 판정
+  -> Slot 3 -> Chromium 검색 -> DB 저장/목표가 판정
+
+동시 Chromium 검색은 하지 않고 순차 실행합니다.
+```
+
+- 저장 슬롯은 **정확히 3개(1, 2, 3)** 입니다.
+- `pause`도 슬롯을 차지합니다. `delete`해야 번호가 비며 다음 `add`에서 재사용됩니다.
+- 각 슬롯은 `target_price`를 필수로 가집니다.
+- 목표가 이하에 새로 진입하면 한 번만 알립니다.
+- 계속 목표가 이하라면 반복 알림하지 않습니다.
+- 목표가 위로 다시 올라가면 `ARMED`로 재무장되고, 이후 다시 내려올 때 새 알림이 가능합니다.
+- 알림 전송 코드는 Provider를 호출하지 않습니다.
+- SQLite는 WAL 모드로 사용합니다.
+
+## 가격의 두 단계
+
+1. **Google 표시가**: 검색 결과 화면에 렌더링된 왕복 가격의 최저값.
+2. **Booking 검증가**: ARMED 상태에서 표시가가 목표가 이하일 때만 출국편/귀국편을 선택해 Booking 화면의 `Lowest total price` 검증을 시도합니다.
+
+기본값 `REQUIRE_VERIFIED_ALERTS=true`에서는 Booking 검증에 성공한 경우에만 목표가 알림을 보냅니다. 화면 가격은 검증 실패 여부와 관계없이 history에 저장됩니다.
 
 ## 명령어
 
 ```text
-/flight add CJJ TPE 2026-10-21 2026-10-25 nonstop
+/flight add CJJ TPE 2026-09-18 2026-09-20 350000
+/flight add CJJ TPE 2026-09-18 2026-09-20 350000 nonstop
 /flight list
 /flight check 1
+/flight target 1 330000
 /flight pause 1
 /flight resume 1
 /flight delete 1
-/help
 ```
 
-현재 자연어 AI 파서는 설정 자리만 마련되어 있고 아직 연결하지 않았습니다. 먼저 명시적 명령으로 Provider/알림 흐름을 안정화한 뒤 Gemini/Groq/OpenRouter 중 하나를 붙이는 것을 권장합니다.
+`nonstop`을 생략하면 경유/혼합/별도티켓 조합을 허용합니다.
 
-## Ubuntu 서버 배포
+## Docker 실행
 
 ```bash
-# 1) 저장소 복제
-# git clone = GitHub 저장소를 서버로 복사
-git clone https://github.com/junmohome92-code/flight-bot.git
-
-# 2) 프로젝트 폴더 이동
-# cd = change directory
-cd flight-bot
-
-# 3) 환경변수 파일 생성
-# cp = copy
-cp .env.example .env
-
-# 4) API 키 입력
-nano .env
-
-# 5) 이미지 빌드 + 백그라운드 실행
-# up = 서비스 실행, -d = detached/background, --build = 이미지 재빌드
-docker compose up -d --build
-
-# 6) 상태 확인
-# ps = 실행 중인 compose 서비스 목록
-docker compose ps
-
-# 7) 로그 확인
-# logs = 로그, -f = 실시간 follow
-docker compose logs -f flight-bot
+cp .env.example .env          # 환경설정 파일 생성
+docker compose build          # Chromium 포함 이미지 빌드
+docker compose up -d          # -d = detached, 백그라운드 실행
+docker compose logs -f        # 실시간 로그 확인
 ```
 
-브라우저 또는 curl에서:
+Chromium의 `/dev/shm` 부족을 피하기 위해 Compose에 `shm_size: 1gb`를 지정했습니다. 브라우저는 검색마다 하나만 실행하며 슬롯은 순차 처리합니다.
 
-```bash
-curl http://127.0.0.1:8080/health
-```
-
-## `.env`에서 나중에 입력할 값
-
-### 필수: 항공권
+## 환경설정
 
 ```env
-SERPAPI_API_KEY=
-```
-
-### Telegram
-
-```env
-TELEGRAM_BOT_TOKEN=
-TELEGRAM_ALLOWED_CHAT_IDS=
-```
-
-`TELEGRAM_ALLOWED_CHAT_IDS`는 쉼표로 여러 개 지정할 수 있습니다. 비워두면 토큰에 접근 가능한 모든 채팅의 명령을 받으므로 개인 운영에서는 채우는 것을 권장합니다.
-
-### Discord
-
-```env
-DISCORD_BOT_TOKEN=
-DISCORD_ALLOWED_CHANNEL_IDS=
-```
-
-Discord Developer Portal에서 **Message Content Intent**를 활성화해야 현재 텍스트 명령 방식이 동작합니다.
-
-### Kakao
-
-```env
-KAKAO_SKILL_SECRET=
-KAKAO_ALLOWED_USER_IDS=
-```
-
-Kakao 챗봇 관리자센터의 Skill URL은 외부에서 HTTPS로 접근 가능한 다음 주소로 연결합니다.
-
-```text
-https://YOUR_DOMAIN/kakao/skill
-```
-
-현재 구현된 Kakao 연동은 **사용자가 카카오톡에서 질문/명령을 보내고 Skill 서버가 답하는 방식**입니다.
-
-예약 스케줄에 따라 서버가 먼저 카카오톡으로 가격 하락 알림을 보내는 기능은 일반 Skill webhook만으로 처리하지 않습니다. 이 기능은 카카오 비즈메시지/알림톡 발송 계약 또는 해당 발송 공급자 API가 확정되면 `Notifier` adapter에 추가합니다. Telegram/Discord 예약 알림은 현재 구조에서 직접 발송 가능합니다.
-
-## 데이터 저장
-
-SQLite 파일은 컨테이너 내부 `/data/flight_bot.db`에 있고 Docker named volume `flight_bot_data`에 보존됩니다.
-
-컨테이너를 다시 만들어도 볼륨을 삭제하지 않는 한 데이터는 유지됩니다.
-
-## 스케줄
-
-기본값:
-
-```env
-TIMEZONE=Asia/Seoul
 CHECK_HOURS=8,20
+BROWSER_HEADLESS=true
+BROWSER_TIMEOUT_MS=45000
+BROWSER_BLOCK_ASSETS=true
+GOOGLE_CURRENCY=KRW
+GOOGLE_GL=kr
+REQUIRE_VERIFIED_ALERTS=true
 ```
 
-즉 매일 한국시간 08:00 / 20:00에 활성 슬롯을 검사합니다.
+문제 분석 시에만 `BROWSER_DEBUG_DIR=/debug`를 켜면 스크린샷을 저장합니다.
 
-가격이 이전 검증 가격보다 낮아지면 해당 슬롯을 만든 Telegram/Discord 채널에 알립니다. 최초 검증 가격도 기준 가격을 만들기 위해 한 번 알림으로 기록합니다.
+## 채널
 
-## 구조
+- Telegram: 조회/명령/능동 알림 지원
+- Discord: 조회/명령/능동 알림 지원
+- Kakao Skill: 현재 요청→응답 webhook만 지원
+- Kakao 능동 알림은 별도 BizMessage/AlimTalk 연동이 필요합니다.
+
+## CJJ ↔ TPE 검증 시나리오
 
 ```text
-flight-bot/
-├── compose.yaml
-├── Dockerfile
-├── .env.example
-├── pyproject.toml
-└── src/flight_bot/
-    ├── __main__.py       # FastAPI + scheduler + bot lifecycle
-    ├── channels.py       # Telegram / Discord adapters
-    ├── config.py         # .env settings
-    ├── db.py             # SQLite
-    ├── models.py         # domain models
-    ├── providers.py      # SerpApi adapter
-    └── service.py        # shared command/search/alert core
+출발: CJJ (청주)
+도착: TPE (타오위안/타이베이)
+출국: 2026-09-18
+귀국: 2026-09-20
+성인: 1
+좌석: Economy
+통화: KRW
+경유/별도티켓: 허용
 ```
 
-## 다음 구현 순서
+로컬/WSL에서:
 
-1. 실제 `SERPAPI_API_KEY`로 CJJ → TPE 테스트
-2. Booking Options 실제 JSON과 adapter 필드 대조
-3. Telegram Bot 연결 테스트
-4. Discord Bot 연결 테스트
-5. Kakao Skill HTTPS endpoint 연결
-6. 자연어 parser 추가 (AI는 JSON 파싱만)
-7. 수하물 정보 검증 강화
-8. Provider fallback 추가
-9. Kakao 능동 알림이 필요하면 알림톡/비즈메시지 provider adapter 추가
+```bash
+pip install -e .
+python -m playwright install chromium
+BROWSER_DEBUG_DIR=artifacts/live-smoke python scripts/live_smoke.py
+```
 
-## 보안
+GitHub Actions의 `cjj-tpe-live-smoke` job도 같은 조건으로 실제 Google Flights를 호출합니다. Google이 CI IP를 CAPTCHA로 막으면 테스트는 실패하고 스크린샷 artifact를 남깁니다. 이 경우 WSL/Ubuntu 서버에서 동일 스크립트로 재검증합니다.
 
-- `.env`는 `.gitignore` 대상입니다.
-- 실제 API 키/봇 토큰은 GitHub에 커밋하지 마세요.
-- Kakao Skill endpoint는 가능하면 reverse proxy에서 HTTPS를 사용하세요.
-- 허용 chat/channel/user ID를 설정해 개인용 봇으로 제한하세요.
+## 테스트
+
+```bash
+pip install -e '.[dev]'
+pytest -q
+```
+
+테스트 범위: KRW 가격 파싱, 고정 슬롯 1/2/3, pause 점유, delete 후 번호 재사용, SQLite WAL, 목표가 latch/re-arm, ALERTED 상태의 상세검증 억제.
+
+## 주의사항
+
+Google Flights는 공개 개발자 API가 아닙니다. UI/DOM 변경, CAPTCHA, IP 제한으로 scraper가 깨질 수 있습니다. Provider 로직과 봇/DB/알림 로직을 분리해 DOM 변경 시 `providers.py`를 집중 수정할 수 있게 했습니다.
+
+실제 구매 전에는 Google Flights/판매처에서 가격, 수하물, 환불/변경 조건을 다시 확인하세요. 위탁수하물 정보가 확인되지 않으면 봇은 `없음`이라고 추정하지 않고 `정보 확인 불가`로 표시합니다.

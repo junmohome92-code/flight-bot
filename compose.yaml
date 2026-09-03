@@ -5,10 +5,13 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    shm_size: "1gb"
     volumes:
       - flight_bot_data:/data
+      - flight_bot_debug:/debug
     ports:
       - "${HTTP_PORT:-8080}:8080"
 
 volumes:
   flight_bot_data:
+  flight_bot_debug:

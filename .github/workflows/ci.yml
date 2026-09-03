@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main, codex/playwright-v2]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[dev]'
+      - run: pytest -q
+
+  cjj-tpe-live-smoke:
+    if: github.ref == 'refs/heads/codex/playwright-v2' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - run: python -m playwright install --with-deps chromium
+      - name: Live Google Flights CJJ-TPE 2026-09-18..20
+        env:
+          BROWSER_DEBUG_DIR: artifacts/live-smoke
+        run: python scripts/live_smoke.py | tee artifacts-live-result.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cjj-tpe-live-smoke
+          path: |
+            artifacts-live-result.txt
+            artifacts/live-smoke/
+          if-no-files-found: ignore

@@ -23,48 +23,34 @@ discord_client = None
 
 
 def kakao_response(text: str) -> dict:
-    return {
-        "version": "2.0",
-        "template": {
-            "outputs": [
-                {"simpleText": {"text": text[:1000]}}
-            ]
-        },
-    }
+    return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": text[:1000]}}]}}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global telegram_app, discord_client
     for hour in settings.scheduled_hours:
-        scheduler.add_job(service.check_all, "cron", hour=hour, minute=0, id=f"check-{hour}", replace_existing=True)
+        scheduler.add_job(service.check_all, "cron", hour=hour, minute=0, id=f"check-{hour}",
+                          replace_existing=True, max_instances=1, coalesce=True)
     scheduler.start()
     telegram_app = await build_telegram(settings, service, notifier)
     discord_client = await start_discord(settings, service, notifier)
     yield
     scheduler.shutdown(wait=False)
     if telegram_app:
-        await telegram_app.updater.stop()
-        await telegram_app.stop()
-        await telegram_app.shutdown()
+        await telegram_app.updater.stop(); await telegram_app.stop(); await telegram_app.shutdown()
     if discord_client:
         await discord_client.close()
 
 
-app = FastAPI(title="Flight Bot", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Flight Bot", version="0.2.0", lifespan=lifespan)
 
 
 @app.get("/health")
 async def health():
-    return {
-        "ok": True,
-        "provider": "serpapi" if settings.serpapi_keys else "not-configured",
-        "serpapi_key_count": len(settings.serpapi_keys),
-        "telegram": bool(settings.telegram_bot_token),
-        "discord": bool(settings.discord_bot_token),
-        "kakao_skill": True,
-        "slots": len(db.list_slots()),
-    }
+    return {"ok": True, "provider": "google-playwright", "browser_headless": settings.browser_headless,
+            "telegram": bool(settings.telegram_bot_token), "discord": bool(settings.discord_bot_token),
+            "kakao_skill": True, "slots_used": len(db.list_slots()), "slots_max": 3}
 
 
 @app.post("/kakao/skill")
@@ -78,8 +64,7 @@ async def kakao_skill(request: Request, x_flight_bot_secret: str | None = Header
     user_id = str(user.get("id") or "unknown")
     if settings.kakao_user_ids and user_id not in settings.kakao_user_ids:
         return kakao_response("허용되지 않은 사용자입니다.")
-    result = await service.command("kakao", user_id, utterance)
-    return kakao_response(result)
+    return kakao_response(await service.command("kakao", user_id, utterance))
 
 
 @app.post("/admin/check-all")
