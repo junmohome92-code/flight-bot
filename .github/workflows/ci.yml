@@ -30,7 +30,7 @@ jobs:
         shell: pwsh
         run: |
           python -m playwright install chromium
-          python -c "import asyncio; from playwright.async_api import async_playwright; exec('async def t():\n    p=await async_playwright().start()\n    b=await p.chromium.launch(headless=True)\n    print(await b.version())\n    await b.close()\n    await p.stop()\nasyncio.run(t())')"
+          python -c "import asyncio; from playwright.async_api import async_playwright; exec('async def t():\n    p=await async_playwright().start()\n    b=await p.chromium.launch(headless=True)\n    print(b.version)\n    await b.close()\n    await p.stop()\nasyncio.run(t())')"
 
   cjj-tpe-live-smoke:
     if: github.event_name == 'workflow_dispatch'
