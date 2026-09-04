@@ -34,6 +34,9 @@ class FlightService:
         # Otherwise two overlapping entry points can both read ARMED before one
         # of them latches ALERTED and send duplicate alerts for the same interval.
         self._check_lock = asyncio.Lock()
+        # Scheduler/admin full scans should not pile up behind one another.  A
+        # second scan request while one is active simply returns.
+        self._scan_lock = asyncio.Lock()
 
     def set_notifier(self, notifier) -> None:
         self.notifier = notifier
@@ -115,11 +118,14 @@ class FlightService:
         return self.format_offer(slot, offer)
 
     async def check_all(self) -> None:
-        for slot in self.db.list_slots(enabled_only=True):
-            # check_slot serializes the full read/search/latch transaction and
-            # converts per-slot provider failures to result text, so one broken
-            # slot cannot stop the remaining checks.
-            await self.check_slot(slot.id, notify_target=True)
+        if self._scan_lock.locked():
+            return
+        async with self._scan_lock:
+            for slot in self.db.list_slots(enabled_only=True):
+                # check_slot serializes the full read/search/latch transaction and
+                # converts per-slot provider failures to result text, so one broken
+                # slot cannot stop the remaining checks.
+                await self.check_slot(slot.id, notify_target=True)
 
     async def command(self, platform: str, owner_id: str, text: str) -> str:
         text = (text or "").strip()
