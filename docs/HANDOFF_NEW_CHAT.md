@@ -12,11 +12,9 @@ docs/HANDOFF_NEW_CHAT.md
 
 ## 현재 한 줄 요약
 
-**Google Flights 실제 transient flight-row 가격 capture는 사용자 Windows에서 성공했습니다. 첫 auto-click probe는 summary/results 전체 컨테이너를 실제 항공편 row로 오인해 `922,965 KRW`를 잘못 선택했고 귀국편으로 전환되지 않았습니다. 현재 코드는 exact compact flight row만 선택하도록 수정됐고, 다음 gate는 정확한 출국편 → 귀국편 → Google Booking options입니다.**
+**Google transient observed-price capture는 성공. 최근 922,965원 오선택은 transient 최저 price span이 사라진 뒤 `isConnected` 필터에 의해 버려지고 안정적으로 남은 비싼 row가 선택된 lifecycle bug로 원인이 확정됐습니다. 현재 active probe는 transient snapshot을 DOM 생존 여부와 분리해 보존하고, capture window 완료 후 최저 후보를 선택하며, Returning flights에서 route 문자열이 생략되는 UI도 제한적으로 지원합니다. 다음 gate는 최저 출국 → 귀국 → Google Booking options입니다.**
 
-runtime `src/flight_bot/providers.py`는 아직 기존 v0.2 Provider이며 migration 완료가 아닙니다.
-
-## 기준 acceptance
+## acceptance
 
 ```text
 CJJ → TPE
@@ -27,70 +25,71 @@ KRW
 all stops / mixed airlines / separate/self-transfer allowed
 ```
 
-가격은 실시간이므로 특정 숫자를 고정 acceptance 값으로 사용하지 않습니다.
+가격은 실시간이므로 특정 금액 고정 금지.
 
-## 이미 폐기한 경로
+## observed gate — PASSED
 
-- SerpApi Primary
-- fast-flights parser 가격 source
-- punitarani/fli direct API
-- 기존 direct tfs URL Provider
-- URL reload/new-tab을 계속 반복하는 전략
-
-가격/수하물 추정은 금지합니다.
-
-## observed-price gate — 통과
-
-사용자 Windows transient probe:
+사용자 Windows에서 약 435ms 시점에 실제 row capture:
 
 ```text
-cheapest_fresh_transient_count=24
-transient_lowest=337,056 KRW
-11:40 PM → 1:10 AM+1
+337,056 KRW
 EASTAR JET
+11:40 PM → 1:10 AM+1
 CJJ–TPE
 Nonstop
 round trip
-seen_ms≈435
 ```
 
-Google Flights가 약 0.4초 시점에 실제 가격 row를 DOM에 렌더링했고 `MutationObserver`가 사라지기 전에 보존했습니다.
-
 ```text
-observed=TRANSIENT_FLIGHT_ROW_CAPTURED
+observed=True
 verified=False
-acceptance=CHEAPEST_OBSERVED_BEFORE_PRICE_UNAVAILABLE
 ```
 
-## 첫 auto-click probe에서 발견된 결함
+## 최근 pointer run에서 확인된 사실
 
-사용자 Windows 결과:
+사용자 결과:
 
 ```text
-departure_click_count=1
 departure_selected=922,965 KRW
-return_click_count=0
+departure_pointer_click_sent=True
+body_has_returning=True
+current_url=selected-departure Google Flights URL
 ```
 
-하지만 `departure_row`에는 실제 한 항공편이 아니라:
+따라서 **pointer click/navigation은 성공**했습니다.
+
+오선택 원인:
 
 ```text
-Best / Cheapest / Fetching results / Checking prices...
-+ Aero K row
-+ Korean Air/Asiana rows
-+ 여러 CJJ-TPE 항공편
+후보 확정 시 source.isConnected + anchor.isConnected + visible 요구
+→ 33만원대 transient price span 소멸
+→ cheap candidate 탈락
+→ 오래 남은 922,965원 candidate 선택
 ```
 
-가 한꺼번에 들어 있었습니다.
+새 후보마다 settle timer를 다시 시작한 것도 transient lowest에 불리했습니다.
 
-즉 **출국 선택 성공이 아니라 broad results container 오클릭**입니다. 이 결과는 acceptance로 인정하지 않습니다.
-
-## 현재 수정된 exact-row auto picker
-
-script:
+귀국 0건 원인:
 
 ```text
-scripts/google_booking_probe.py
+return_selection_failed=True
+body_has_returning=True
+```
+
+Returning flights 화면은 실제로 로드됐지만 detector가 카드 안에 `TPE-CJJ` literal을 강제했습니다. 현재는 Returning flights marker를 먼저 확인한 경우에만 route-less compact return card를 허용합니다. `CJJ-TPE`가 섞인 card는 계속 거부합니다.
+
+## 현재 active 구조
+
+공통 정책:
+
+```text
+src/flight_bot/google_ui_contract.py
+```
+
+active live script:
+
+```text
+scripts/google_booking_pointer_probe.py
 ```
 
 Windows:
@@ -99,101 +98,154 @@ Windows:
 flight-bot - test win/02-live-cjj-tpe-visible.cmd
 ```
 
-후보 row 필수 조건:
+현재 probe는 standalone입니다. 이전 `pointer → booking → transient → ui` importlib 체인을 제거했습니다.
+
+obsolete current-tree files 제거:
 
 ```text
-요청 route(CJJ-TPE 또는 TPE-CJJ) 정확히 1회
-시간 표현 2~4개
-row 내 KRW 가격 1~3개
-row text <= 2200자
-flight shape marker 존재
+scripts/google_booking_probe.py
+scripts/google_cheapest_fresh_probe.py
+tests/test_google_booking_probe.py
 ```
 
-여러 항공편을 동시에 포함한 큰 container는 자동 탈락합니다.
-
-transient price element에서 exact row를 찾는 순간:
+## 현재 selection 정책
 
 ```text
-data-flight-bot-row-id
-data-flight-bot-target-id
+canonical Cheapest URL
+→ early direct-price rows snapshot
+→ price/row/anchor coordinate를 즉시 보존
+→ 원 price span이 사라져도 snapshot 유지
+→ 출국 첫 후보 후 900ms capture window 완료까지 대기
+→ Cheapest advertised price를 seen-minimum(low-water) guard로 유지
+→ preserved snapshots 중 최저 trustworthy row 선택
+→ advertised보다 비싼 fallback만 있으면 FAIL, 절대 클릭 안 함
+→ real Playwright mouse click
+→ Returning flights marker 확인
+→ return first candidate 후 650ms capture
+→ return card 최저 pointer click
+→ Booking CTA-scoped prices
 ```
 
-를 실제 DOM에 붙이고 그 동일 target을 클릭합니다. 클릭 시 ancestor를 다시 추정하지 않습니다.
-
-추가 보강:
-
-- candidate settle 약 70ms
-- canonical Cheapest `tfu` URL 직접 open으로 acceptance startup 단축
-- departure→returning phase와 click 기록을 `sessionStorage`에 유지
-- full navigation이 발생해도 returning phase 복원
-- broad-results-container 회귀 테스트 추가
-
-## 다음 live 성공 기준
+성공 출력 핵심:
 
 ```text
-departure_click_count=1
-departure_row_shape=times:2 route_count:1 prices:1 ...
-departure_selected=... KRW
+departure_selected=...
+departure_selection_policy=advertised-guarded-lowest 또는 captured-lowest
+departure_advertised=...
+departure_candidate_prices=...
+departure_pointer_click_mode=live-marked-anchor 또는 captured-coordinate
+departure_navigation_confirmed=True
 
-auto target/row ID 출력
-
-return_click_count=1
-return_row_shape=times:2 route_count:1 prices:1 ...
-return_selected=... KRW
+return_selected=...
+return_selection_policy=captured-lowest
+return_candidate_prices=...
+return_pointer_click_sent=True
 
 booking_options_marker=True
 booking_option_candidates=>0
 
 === SUMMARY ===
-departure_observed=...
-return_selection_price=...
-google_booking_option=...
-observed=True
-booking_option_visible=True
+acceptance=GOOGLE_BOOKING_OPTION_REACHED_FROM_PRESERVED_TRANSIENT_SNAPSHOTS
 external_checkout_verified=False
 verified=False
-acceptance=GOOGLE_BOOKING_OPTION_REACHED_FROM_EXACT_TRANSIENT_ROWS
 ```
 
-## 결과 분기
-
-### A. exact 출국/귀국 선택 + Booking option 성공
-
-다음 gate는 외부 판매처 checkout의 실제 final total 검증입니다. 그 전까지 `verified=False`와 `REQUIRE_VERIFIED_ALERTS=true` 유지.
-
-### B. exact 출국 row가 0건
-
-`departure-selection-failed.*`와 `auto-click-state-departure-failed.json`을 기준으로 exact-row 제한을 조정합니다. broad container fallback은 금지합니다.
-
-### C. exact 출국은 선택되나 귀국 0건
-
-`return-selection-failed.*` artifact로 실제 returning route/DOM 구조를 확인합니다. broad ancestor 방식으로 되돌리지 않습니다.
-
-### D. 귀국까지 선택되나 Booking option 0건
-
-Booking options CTA/price DOM만 보강합니다.
-
-## GitHub hosted CI 정책
-
-GitHub hosted Windows에서는 Google flight-row 가격 자체가 내려오지 않는 것이 확인됐으므로 live Google price는 blocking CI가 아닙니다.
-
-일반 CI:
+만약 Cheapest가 약 335k를 광고하는데 snapshot에 922k만 있다면 예상 failure는:
 
 ```text
-Linux Python 3.12 → install → compileall → pytest
-Windows Python 3.12 → install → compileall → pytest → Playwright Chromium launch
+Cheapest tab advertised a lower price than every captured departure row;
+refusing expensive fallback
 ```
+
+이 경우 922k를 선택하면 안 됩니다.
+
+## 실패 artifact
+
+```text
+artifacts/google-ui-win/snapshot-departure-state.json
+artifacts/google-ui-win/snapshot-return-state.json
+artifacts/google-ui-win/snapshot-error-state.json
+artifacts/google-ui-win/*.png/.txt/.html
+```
+
+특히 return 실패 시 `snapshot-return-state.json`의:
+
+```text
+returningMarker
+candidates[].price
+candidates[].rowText
+candidates[].sourceText
+```
+
+를 확인합니다.
+
+## runtime 안전 상태
+
+`src/flight_bot/providers.py`는 아직 최종 migration 전입니다.
+
+현재 legacy runtime:
+
+```text
+name=google-playwright-legacy-unverified
+accepted_for_alerts=False
+```
+
+- page-wide KRW min 금지
+- row-scoped observed만 허용
+- seller checkout 미구현 → 항상 `price_verified=False`
+- 기본 `REQUIRE_VERIFIED_ALERTS=true`이므로 legacy runtime 가격으로 threshold alert 불가
+- baggage 미확인 = `정보 확인 불가`
+
+최종 live gate 통과 후 accepted transient flow로 Provider migration.
+
+## Core audit에서 같이 패치된 항목
+
+- full check transaction global lock: scheduler/admin/manual overlap에서도 검색 + alert latch 직렬화
+- overlapping `check_all` scan 방지
+- notifier 실패 시 ALERTED latch 금지
+- 없는 slot `/flight target` 성공 오표시 수정
+- return date < departure date 거부
+- legacy DB migration 누락(`last_verified_price`, currency, offers fields) 보강
+- `FlightOffer.observed_price` / `verified_price` 명시
+- `/health`가 실제 provider + alert acceptance 상태 표시
+
+## verified 경계
+
+```text
+Google row             = observed
+Google Booking option  = booking option visible
+external seller final total = verified
+```
+
+외부 checkout 전에는 항상:
+
+```text
+external_checkout_verified=False
+verified=False
+```
+
+## 다음 액션
+
+사용자가 최신 ZIP을 받은 뒤 **01은 생략하고 `02-live-cjj-tpe-visible.cmd`만 실행**합니다.
+
+A. 최저 출국 + 귀국 + Booking option 성공 → external seller checkout gate 설계
+
+B. 출국에서 fail-closed → `snapshot-departure-state.json`으로 missing cheapest capture 원인 확인
+
+C. Returning page는 True인데 return candidate 0 → `snapshot-return-state.json`으로 실제 return-card DOM 조정
+
+D. return click까지 성공, Booking 0 → Booking CTA/price scope만 보강
 
 ## 유지 요구사항
 
-- 슬롯 정확히 3개
-- pause 슬롯 점유 / delete 후 번호 재사용
-- `target_price` 필수
-- ARMED → 목표가 하향 돌파 1회 → ALERTED → 목표가 위 복귀 시 re-arm
-- 동일 below-target 구간 반복 알림 금지
-- notifier가 Provider 호출 금지
+- exactly 3 slots
+- pause occupies / delete reuses
+- target_price mandatory
+- ARMED/ALERTED latch semantics
+- no repeated below-target alerts
+- notifier never invokes Provider
 - SQLite WAL
-- 검색 순차 실행
+- searches globally sequential
 - `REQUIRE_VERIFIED_ALERTS=true`
-- observed와 verified 구분
-- 위탁수하물 미확인 = `정보 확인 불가`
+- never synthesize price/baggage
+- unknown baggage = `정보 확인 불가`
