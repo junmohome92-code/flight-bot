@@ -30,9 +30,10 @@ class FlightService:
         self.db = db
         self.provider = provider or GoogleFlightsPlaywrightProvider(settings)
         self.notifier = None
-        # All entry points (scheduler/admin/manual commands) share this lock, so
-        # provider searches are sequential even when requests overlap.
-        self._provider_lock = asyncio.Lock()
+        # Serialize the *entire* check transaction, not just provider.search().
+        # Otherwise two overlapping entry points can both read ARMED before one
+        # of them latches ALERTED and send duplicate alerts for the same interval.
+        self._check_lock = asyncio.Lock()
 
     def set_notifier(self, notifier) -> None:
         self.notifier = notifier
@@ -67,14 +68,17 @@ class FlightService:
             return False
 
     async def check_slot(self, slot_id: int, *, notify_target: bool = False) -> str:
+        async with self._check_lock:
+            return await self._check_slot_locked(slot_id, notify_target=notify_target)
+
+    async def _check_slot_locked(self, slot_id: int, *, notify_target: bool) -> str:
         slot = self.db.get_slot(slot_id)
         if not slot:
             return f"슬롯 #{slot_id}을 찾을 수 없습니다."
         verify_threshold = slot.target_price if slot.alert_state == ALERT_ARMED else None
         run_id = self.db.start_search(slot.id, self.provider.name)
         try:
-            async with self._provider_lock:
-                offer = await self.provider.search(slot, verify_below_price=verify_threshold)
+            offer = await self.provider.search(slot, verify_below_price=verify_threshold)
         except ProviderError as exc:
             self.db.finish_search(run_id, status="failed", message=str(exc)[:500])
             return f"조회 실패: {exc}"
@@ -112,8 +116,9 @@ class FlightService:
 
     async def check_all(self) -> None:
         for slot in self.db.list_slots(enabled_only=True):
-            # check_slot converts provider/unexpected failures to a result string,
-            # so one broken slot does not stop the remaining sequential checks.
+            # check_slot serializes the full read/search/latch transaction and
+            # converts per-slot provider failures to result text, so one broken
+            # slot cannot stop the remaining checks.
             await self.check_slot(slot.id, notify_target=True)
 
     async def command(self, platform: str, owner_id: str, text: str) -> str:
