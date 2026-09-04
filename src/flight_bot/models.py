@@ -53,3 +53,21 @@ class FlightOffer:
     nonstop: bool | None = None
     raw: dict[str, Any] | None = None
     fetched_at: datetime | None = None
+
+    @property
+    def observed_price(self) -> int:
+        """Price actually observed in the provider UI/result row.
+
+        A verified checkout may legitimately differ from the earlier observed
+        row. Providers should preserve the row value in raw['observed_price'].
+        """
+        raw_value = (self.raw or {}).get("observed_price")
+        try:
+            return int(raw_value) if raw_value is not None else int(self.total_price)
+        except (TypeError, ValueError):
+            return int(self.total_price)
+
+    @property
+    def verified_price(self) -> int | None:
+        """Final verified price, or None when verification has not crossed the contract boundary."""
+        return int(self.total_price) if self.price_verified else None
