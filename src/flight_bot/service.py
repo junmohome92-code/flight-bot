@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 
 from .config import Settings
@@ -29,6 +30,9 @@ class FlightService:
         self.db = db
         self.provider = provider or GoogleFlightsPlaywrightProvider(settings)
         self.notifier = None
+        # All entry points (scheduler/admin/manual commands) share this lock, so
+        # provider searches are sequential even when requests overlap.
+        self._provider_lock = asyncio.Lock()
 
     def set_notifier(self, notifier) -> None:
         self.notifier = notifier
@@ -38,12 +42,14 @@ class FlightService:
         state = "ON" if slot.enabled else "PAUSED"
         direct = "직항" if slot.nonstop else "경유/혼합 허용"
         observed = f" / 최근 {slot.last_observed_price:,}{slot.currency}" if slot.last_observed_price else ""
-        return (f"#{slot.id} [{state}/{slot.alert_state}] {slot.origin}→{slot.destination} "
-                f"{slot.depart_date}~{slot.return_date} / {direct} / 목표 {slot.target_price:,}{slot.currency}{observed}")
+        return (
+            f"#{slot.id} [{state}/{slot.alert_state}] {slot.origin}→{slot.destination} "
+            f"{slot.depart_date}~{slot.return_date} / {direct} / 목표 {slot.target_price:,}{slot.currency}{observed}"
+        )
 
     @staticmethod
     def format_offer(slot: WatchSlot, offer: FlightOffer) -> str:
-        verified = "✅ Booking 검증가" if offer.price_verified else "🔎 Google 표시가"
+        verified = "✅ 최종 검증가" if offer.price_verified else "🔎 Google 표시가"
         ticket = " / 별도티켓·셀프트랜스퍼" if offer.separate_ticket else ""
         return (
             f"✈️ {slot.origin} → {slot.destination}\n{slot.depart_date} ~ {slot.return_date}\n"
@@ -67,19 +73,37 @@ class FlightService:
         verify_threshold = slot.target_price if slot.alert_state == ALERT_ARMED else None
         run_id = self.db.start_search(slot.id, self.provider.name)
         try:
-            offer = await self.provider.search(slot, verify_below_price=verify_threshold)
+            async with self._provider_lock:
+                offer = await self.provider.search(slot, verify_below_price=verify_threshold)
         except ProviderError as exc:
             self.db.finish_search(run_id, status="failed", message=str(exc)[:500])
             return f"조회 실패: {exc}"
+        except Exception as exc:
+            self.db.finish_search(run_id, status="failed", message=f"unexpected: {exc}"[:500])
+            return f"조회 실패: 예상하지 못한 오류 ({type(exc).__name__})"
+
         self.db.save_offer(slot.id, offer)
-        self.db.finish_search(run_id, status="success", message=f"price={offer.total_price}; verified={offer.price_verified}")
+        self.db.finish_search(
+            run_id,
+            status="success",
+            message=f"price={offer.total_price}; verified={offer.price_verified}",
+        )
 
         effective_price = offer.total_price
         below_target = effective_price <= slot.target_price
         alert_eligible = offer.price_verified or not self.settings.require_verified_alerts
         if below_target:
             if notify_target and slot.alert_state == ALERT_ARMED and alert_eligible and self.notifier:
-                await self.notifier.send(slot.owner_platform, slot.owner_id, "🔥 목표가 도달\n" + self.format_offer(slot, offer))
+                try:
+                    await self.notifier.send(
+                        slot.owner_platform,
+                        slot.owner_id,
+                        "🔥 목표가 도달\n" + self.format_offer(slot, offer),
+                    )
+                except Exception as exc:
+                    # Do not latch ALERTED when delivery failed; the next run may
+                    # retry after the notification channel recovers.
+                    return self.format_offer(slot, offer) + f"\n알림 전송 실패: {type(exc).__name__}"
                 self.db.record_alert(slot, offer)
                 self.db.set_alert_state(slot.id, ALERTED, alerted_price=effective_price)
         elif slot.alert_state == ALERTED:
@@ -88,6 +112,8 @@ class FlightService:
 
     async def check_all(self) -> None:
         for slot in self.db.list_slots(enabled_only=True):
+            # check_slot converts provider/unexpected failures to a result string,
+            # so one broken slot does not stop the remaining sequential checks.
             await self.check_slot(slot.id, notify_target=True)
 
     async def command(self, platform: str, owner_id: str, text: str) -> str:
@@ -106,15 +132,25 @@ class FlightService:
                 return "형식: /flight add CJJ TPE 2026-09-18 2026-09-20 350000 [nonstop]"
             if not (self._valid_date(parts[4]) and self._valid_date(parts[5])):
                 return "날짜 형식은 YYYY-MM-DD 입니다."
+            if date.fromisoformat(parts[5]) < date.fromisoformat(parts[4]):
+                return "귀국일은 출발일보다 빠를 수 없습니다."
             try:
                 target = int(parts[6].replace(",", ""))
             except ValueError:
                 return "목표가는 숫자로 입력해 주세요. 예: 350000"
             nonstop = len(parts) >= 8 and parts[7].lower() in {"nonstop", "direct", "직항"}
             try:
-                slot = self.db.add_slot(platform=platform, owner_id=owner_id, origin=parts[2], destination=parts[3],
-                                        depart_date=parts[4], return_date=parts[5], target_price=target,
-                                        nonstop=nonstop, checked_bag=0)
+                slot = self.db.add_slot(
+                    platform=platform,
+                    owner_id=owner_id,
+                    origin=parts[2],
+                    destination=parts[3],
+                    depart_date=parts[4],
+                    return_date=parts[5],
+                    target_price=target,
+                    nonstop=nonstop,
+                    checked_bag=0,
+                )
             except ValueError as exc:
                 return str(exc)
             return "감시 슬롯을 추가했습니다.\n" + self.format_slot(slot)
@@ -126,12 +162,15 @@ class FlightService:
         if action == "target":
             if len(parts) < 4 or not parts[2].isdigit():
                 return "형식: /flight target <슬롯번호> <목표가>"
+            slot_id = int(parts[2])
+            if not self.db.get_slot(slot_id):
+                return f"슬롯 #{slot_id}을 찾을 수 없습니다."
             try:
                 price = int(parts[3].replace(",", ""))
-                self.db.set_target(int(parts[2]), price)
+                self.db.set_target(slot_id, price)
             except ValueError as exc:
                 return str(exc)
-            return f"슬롯 #{parts[2]} 목표가를 {price:,}KRW로 변경하고 알림을 재무장했습니다."
+            return f"슬롯 #{slot_id} 목표가를 {price:,}KRW로 변경하고 알림을 재무장했습니다."
 
         if action in {"check", "pause", "resume", "delete"}:
             if len(parts) < 3 or not parts[2].isdigit():
