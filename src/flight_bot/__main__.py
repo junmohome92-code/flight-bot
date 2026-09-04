@@ -30,15 +30,25 @@ def kakao_response(text: str) -> dict:
 async def lifespan(app: FastAPI):
     global telegram_app, discord_client
     for hour in settings.scheduled_hours:
-        scheduler.add_job(service.check_all, "cron", hour=hour, minute=0, id=f"check-{hour}",
-                          replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(
+            service.check_all,
+            "cron",
+            hour=hour,
+            minute=0,
+            id=f"check-{hour}",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
     scheduler.start()
     telegram_app = await build_telegram(settings, service, notifier)
     discord_client = await start_discord(settings, service, notifier)
     yield
     scheduler.shutdown(wait=False)
     if telegram_app:
-        await telegram_app.updater.stop(); await telegram_app.stop(); await telegram_app.shutdown()
+        await telegram_app.updater.stop()
+        await telegram_app.stop()
+        await telegram_app.shutdown()
     if discord_client:
         await discord_client.close()
 
@@ -48,9 +58,18 @@ app = FastAPI(title="Flight Bot", version="0.2.0", lifespan=lifespan)
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "provider": "google-playwright", "browser_headless": settings.browser_headless,
-            "telegram": bool(settings.telegram_bot_token), "discord": bool(settings.discord_bot_token),
-            "kakao_skill": True, "slots_used": len(db.list_slots()), "slots_max": 3}
+    return {
+        "ok": True,
+        "provider": service.provider.name,
+        "provider_accepted_for_alerts": bool(getattr(service.provider, "accepted_for_alerts", True)),
+        "require_verified_alerts": settings.require_verified_alerts,
+        "browser_headless": settings.browser_headless,
+        "telegram": bool(settings.telegram_bot_token),
+        "discord": bool(settings.discord_bot_token),
+        "kakao_skill": True,
+        "slots_used": len(db.list_slots()),
+        "slots_max": 3,
+    }
 
 
 @app.post("/kakao/skill")
@@ -76,6 +95,7 @@ async def check_all(x_flight_bot_secret: str | None = Header(default=None)):
 
 
 def main():
+    # Container listens on 8080; compose maps HTTP_PORT on the host side.
     uvicorn.run(app, host="0.0.0.0", port=8080, log_level="info")
 
 
