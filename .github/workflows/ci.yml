@@ -47,6 +47,8 @@ jobs:
       - name: Run native Edge fresh-tab probe
         shell: pwsh
         env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
           BROWSER_HEADLESS: "false"
           BROWSER_TIMEOUT_MS: "60000"
           BROWSER_DEBUG_DIR: artifacts/google-ui-ci
@@ -57,7 +59,7 @@ jobs:
         run: |
           cmd /c "python scripts\google_ui_probe.py > artifacts-ui-result.txt 2>&1"
           $code = $LASTEXITCODE
-          Get-Content artifacts-ui-result.txt
+          Get-Content artifacts-ui-result.txt -Encoding UTF8
           Write-Host "probe_exit_code=$code"
           exit 0
       - uses: actions/upload-artifact@v4
