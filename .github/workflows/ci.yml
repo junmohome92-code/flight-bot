@@ -15,6 +15,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e '.[dev]'
+      - run: python -m compileall -q src scripts tests
       - run: pytest -q
 
   unit-windows:
@@ -25,6 +26,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install -e '.[dev]'
+      - run: python -m compileall -q src scripts tests
       - run: python -m pytest -q
       - name: Verify Windows Playwright Chromium install and launch
         shell: pwsh
@@ -32,7 +34,7 @@ jobs:
           python -m playwright install chromium
           python -c "import asyncio; from playwright.async_api import async_playwright; exec('async def t():\n    p=await async_playwright().start()\n    b=await p.chromium.launch(headless=True)\n    print(b.version)\n    await b.close()\n    await p.stop()\nasyncio.run(t())')"
 
-  cjj-tpe-live-smoke:
+  cjj-tpe-ui-diagnostic:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -43,17 +45,20 @@ jobs:
           python-version: "3.12"
       - run: pip install -e .
       - run: python -m playwright install --with-deps chromium
-      - name: Live Google Flights CJJ-TPE 2026-09-18..20
+      - name: Google Flights UI CJJ-TPE 2026-09-18..20
         env:
-          BROWSER_DEBUG_DIR: artifacts/live-smoke
+          BROWSER_HEADLESS: "true"
+          BROWSER_DEBUG_DIR: artifacts/google-ui-ci
+          BROWSER_PROFILE_DIR: artifacts/google-profile-ci
+          BROWSER_KEEP_OPEN_SECONDS: "0"
         run: |
           set -o pipefail
-          python scripts/live_smoke.py | tee artifacts-live-result.txt
+          python scripts/google_ui_probe.py | tee artifacts-ui-result.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: cjj-tpe-live-smoke
+          name: cjj-tpe-ui-diagnostic
           path: |
-            artifacts-live-result.txt
-            artifacts/live-smoke/
+            artifacts-ui-result.txt
+            artifacts/google-ui-ci/
           if-no-files-found: ignore
