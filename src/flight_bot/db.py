@@ -102,46 +102,86 @@ class Database:
         return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
     def _migrate_legacy(self, conn: sqlite3.Connection) -> None:
+        # CREATE TABLE IF NOT EXISTS does not add new columns to an existing DB.
+        # Keep this list aligned with every column read by _slot/save_offer so an
+        # older home-server database can start safely after an upgrade.
         columns = self._columns(conn, "watch_slots")
         additions = {
             "target_price": "INTEGER NOT NULL DEFAULT 0",
             "alert_state": "TEXT NOT NULL DEFAULT 'ARMED'",
             "last_observed_price": "INTEGER",
             "lowest_observed_price": "INTEGER",
+            "last_verified_price": "INTEGER",
             "last_checked_at": "TEXT",
             "last_alerted_price": "INTEGER",
             "last_alerted_at": "TEXT",
+            "currency": "TEXT NOT NULL DEFAULT 'KRW'",
         }
         for name, ddl in additions.items():
             if name not in columns:
                 conn.execute(f"ALTER TABLE watch_slots ADD COLUMN {name} {ddl}")
 
         offer_columns = self._columns(conn, "offers")
-        for name, ddl in {"separate_ticket": "INTEGER", "nonstop": "INTEGER"}.items():
+        offer_additions = {
+            "price_verified": "INTEGER NOT NULL DEFAULT 0",
+            "airline": "TEXT",
+            "outbound_flight": "TEXT",
+            "inbound_flight": "TEXT",
+            "separate_ticket": "INTEGER",
+            "nonstop": "INTEGER",
+            "booking_provider": "TEXT",
+            "booking_url": "TEXT",
+        }
+        for name, ddl in offer_additions.items():
             if name not in offer_columns:
                 conn.execute(f"ALTER TABLE offers ADD COLUMN {name} {ddl}")
 
     @staticmethod
     def _slot(row: sqlite3.Row) -> WatchSlot:
         return WatchSlot(
-            id=row["id"], owner_platform=row["owner_platform"], owner_id=row["owner_id"],
-            origin=row["origin"], destination=row["destination"], depart_date=row["depart_date"],
-            return_date=row["return_date"], nonstop=bool(row["nonstop"]), checked_bag=row["checked_bag"],
-            enabled=bool(row["enabled"]), target_price=row["target_price"], alert_state=row["alert_state"],
-            last_observed_price=row["last_observed_price"], lowest_observed_price=row["lowest_observed_price"],
-            last_verified_price=row["last_verified_price"], last_checked_at=row["last_checked_at"],
-            last_alerted_price=row["last_alerted_price"], last_alerted_at=row["last_alerted_at"],
+            id=row["id"],
+            owner_platform=row["owner_platform"],
+            owner_id=row["owner_id"],
+            origin=row["origin"],
+            destination=row["destination"],
+            depart_date=row["depart_date"],
+            return_date=row["return_date"],
+            nonstop=bool(row["nonstop"]),
+            checked_bag=row["checked_bag"],
+            enabled=bool(row["enabled"]),
+            target_price=row["target_price"],
+            alert_state=row["alert_state"],
+            last_observed_price=row["last_observed_price"],
+            lowest_observed_price=row["lowest_observed_price"],
+            last_verified_price=row["last_verified_price"],
+            last_checked_at=row["last_checked_at"],
+            last_alerted_price=row["last_alerted_price"],
+            last_alerted_at=row["last_alerted_at"],
             currency=row["currency"],
         )
 
     def _occupied_ids(self, conn: sqlite3.Connection) -> set[int]:
         return {row[0] for row in conn.execute("SELECT id FROM watch_slots WHERE id BETWEEN 1 AND 3")}
 
-    def add_slot(self, *, platform: str, owner_id: str, origin: str, destination: str,
-                 depart_date: str, return_date: str, target_price: int, nonstop: bool,
-                 checked_bag: int) -> WatchSlot:
+    def add_slot(
+        self,
+        *,
+        platform: str,
+        owner_id: str,
+        origin: str,
+        destination: str,
+        depart_date: str,
+        return_date: str,
+        target_price: int,
+        nonstop: bool,
+        checked_bag: int,
+    ) -> WatchSlot:
         if target_price <= 0:
             raise ValueError("목표가는 0원보다 커야 합니다.")
+        origin = origin.strip().upper()
+        destination = destination.strip().upper()
+        if not origin or not destination or origin == destination:
+            raise ValueError("출발지와 도착지를 서로 다른 공항 코드로 입력해 주세요.")
         now = datetime.now(timezone.utc).isoformat()
         with self.connect() as conn:
             occupied = self._occupied_ids(conn)
@@ -153,8 +193,21 @@ class Database:
                 (id, owner_platform, owner_id, origin, destination, depart_date, return_date,
                  nonstop, checked_bag, enabled, target_price, alert_state, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)""",
-                (slot_id, platform, owner_id, origin.upper(), destination.upper(), depart_date, return_date,
-                 int(nonstop), max(0, checked_bag), target_price, ALERT_ARMED, now, now),
+                (
+                    slot_id,
+                    platform,
+                    owner_id,
+                    origin,
+                    destination,
+                    depart_date,
+                    return_date,
+                    int(nonstop),
+                    max(0, checked_bag),
+                    target_price,
+                    ALERT_ARMED,
+                    now,
+                    now,
+                ),
             )
             row = conn.execute("SELECT * FROM watch_slots WHERE id=?", (slot_id,)).fetchone()
         return self._slot(row)
@@ -177,15 +230,23 @@ class Database:
 
     def set_enabled(self, slot_id: int, enabled: bool) -> None:
         with self.connect() as conn:
-            conn.execute("UPDATE watch_slots SET enabled=?, updated_at=? WHERE id=?",
-                         (int(enabled), datetime.now(timezone.utc).isoformat(), slot_id))
+            cur = conn.execute(
+                "UPDATE watch_slots SET enabled=?, updated_at=? WHERE id=?",
+                (int(enabled), datetime.now(timezone.utc).isoformat(), slot_id),
+            )
+            if cur.rowcount == 0:
+                raise ValueError(f"슬롯 #{slot_id}을 찾을 수 없습니다.")
 
     def set_target(self, slot_id: int, target_price: int) -> None:
         if target_price <= 0:
             raise ValueError("목표가는 0원보다 커야 합니다.")
         with self.connect() as conn:
-            conn.execute("UPDATE watch_slots SET target_price=?, alert_state=?, updated_at=? WHERE id=?",
-                         (target_price, ALERT_ARMED, datetime.now(timezone.utc).isoformat(), slot_id))
+            cur = conn.execute(
+                "UPDATE watch_slots SET target_price=?, alert_state=?, updated_at=? WHERE id=?",
+                (target_price, ALERT_ARMED, datetime.now(timezone.utc).isoformat(), slot_id),
+            )
+            if cur.rowcount == 0:
+                raise ValueError(f"슬롯 #{slot_id}을 찾을 수 없습니다.")
 
     def delete_slot(self, slot_id: int) -> None:
         with self.connect() as conn:
@@ -197,14 +258,18 @@ class Database:
     def start_search(self, slot_id: int, provider: str) -> int:
         now = datetime.now(timezone.utc).isoformat()
         with self.connect() as conn:
-            cur = conn.execute("INSERT INTO search_runs_v2(slot_id, provider, status, started_at) VALUES (?, ?, 'running', ?)",
-                               (slot_id, provider, now))
+            cur = conn.execute(
+                "INSERT INTO search_runs_v2(slot_id, provider, status, started_at) VALUES (?, ?, 'running', ?)",
+                (slot_id, provider, now),
+            )
             return int(cur.lastrowid)
 
     def finish_search(self, run_id: int, *, status: str, message: str | None = None) -> None:
         with self.connect() as conn:
-            conn.execute("UPDATE search_runs_v2 SET status=?, message=?, finished_at=? WHERE id=?",
-                         (status, message, datetime.now(timezone.utc).isoformat(), run_id))
+            conn.execute(
+                "UPDATE search_runs_v2 SET status=?, message=?, finished_at=? WHERE id=?",
+                (status, message, datetime.now(timezone.utc).isoformat(), run_id),
+            )
 
     def save_offer(self, slot_id: int, offer: FlightOffer) -> None:
         fetched = (offer.fetched_at or datetime.now(timezone.utc)).isoformat()
@@ -216,35 +281,71 @@ class Database:
                  outbound_flight, inbound_flight, separate_ticket, nonstop,
                  booking_provider, booking_url, fetched_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (slot_id, offer.provider, offer.total_price, offer.currency, int(offer.price_verified),
-                 offer.airline, offer.outbound_flight, offer.inbound_flight,
-                 None if offer.separate_ticket is None else int(offer.separate_ticket),
-                 None if offer.nonstop is None else int(offer.nonstop), offer.booking_provider,
-                 offer.booking_url, fetched),
+                (
+                    slot_id,
+                    offer.provider,
+                    offer.total_price,
+                    offer.currency,
+                    int(offer.price_verified),
+                    offer.airline,
+                    offer.outbound_flight,
+                    offer.inbound_flight,
+                    None if offer.separate_ticket is None else int(offer.separate_ticket),
+                    None if offer.nonstop is None else int(offer.nonstop),
+                    offer.booking_provider,
+                    offer.booking_url,
+                    fetched,
+                ),
             )
-            current_low = conn.execute("SELECT lowest_observed_price FROM watch_slots WHERE id=?", (slot_id,)).fetchone()[0]
+            row = conn.execute(
+                "SELECT lowest_observed_price FROM watch_slots WHERE id=?",
+                (slot_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"슬롯 #{slot_id}을 찾을 수 없습니다.")
+            current_low = row[0]
             new_low = observed if current_low is None else min(current_low, observed)
             conn.execute(
                 """UPDATE watch_slots
                 SET last_observed_price=?, lowest_observed_price=?, last_checked_at=?, currency=?,
                     last_verified_price=CASE WHEN ? THEN ? ELSE last_verified_price END,
                     updated_at=? WHERE id=?""",
-                (observed, new_low, fetched, offer.currency, int(offer.price_verified), offer.total_price,
-                 fetched, slot_id),
+                (
+                    observed,
+                    new_low,
+                    fetched,
+                    offer.currency,
+                    int(offer.price_verified),
+                    offer.total_price,
+                    fetched,
+                    slot_id,
+                ),
             )
 
     def set_alert_state(self, slot_id: int, state: str, *, alerted_price: int | None = None) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self.connect() as conn:
             if state == ALERTED:
-                conn.execute("UPDATE watch_slots SET alert_state=?, last_alerted_price=?, last_alerted_at=?, updated_at=? WHERE id=?",
-                             (state, alerted_price, now, now, slot_id))
+                conn.execute(
+                    "UPDATE watch_slots SET alert_state=?, last_alerted_price=?, last_alerted_at=?, updated_at=? WHERE id=?",
+                    (state, alerted_price, now, now, slot_id),
+                )
             else:
-                conn.execute("UPDATE watch_slots SET alert_state=?, updated_at=? WHERE id=?",
-                             (state, now, slot_id))
+                conn.execute(
+                    "UPDATE watch_slots SET alert_state=?, updated_at=? WHERE id=?",
+                    (state, now, slot_id),
+                )
 
     def record_alert(self, slot: WatchSlot, offer: FlightOffer) -> None:
         with self.connect() as conn:
-            conn.execute("INSERT INTO alert_history (slot_id, platform, recipient_id, total_price, currency, sent_at) VALUES (?, ?, ?, ?, ?, ?)",
-                         (slot.id, slot.owner_platform, slot.owner_id, offer.total_price, offer.currency,
-                          datetime.now(timezone.utc).isoformat()))
+            conn.execute(
+                "INSERT INTO alert_history (slot_id, platform, recipient_id, total_price, currency, sent_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    slot.id,
+                    slot.owner_platform,
+                    slot.owner_id,
+                    offer.total_price,
+                    offer.currency,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
