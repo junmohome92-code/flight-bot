@@ -12,7 +12,7 @@ docs/HANDOFF_NEW_CHAT.md
 
 ## 현재 한 줄 요약
 
-**Google Flights의 실제 최저가 flight-row를 사라지기 전에 캡처하는 1차 acceptance는 사용자 Windows에서 성공했습니다. 현재 gate는 그 transient 최저 출국편을 즉시 클릭하고, 귀국편도 같은 방식으로 선택해 Google Booking options까지 도달하는 것입니다.**
+**Google Flights 실제 transient flight-row 가격 capture는 사용자 Windows에서 성공했습니다. 첫 auto-click probe는 summary/results 전체 컨테이너를 실제 항공편 row로 오인해 `922,965 KRW`를 잘못 선택했고 귀국편으로 전환되지 않았습니다. 현재 코드는 exact compact flight row만 선택하도록 수정됐고, 다음 gate는 정확한 출국편 → 귀국편 → Google Booking options입니다.**
 
 runtime `src/flight_bot/providers.py`는 아직 기존 v0.2 Provider이며 migration 완료가 아닙니다.
 
@@ -39,9 +39,9 @@ all stops / mixed airlines / separate/self-transfer allowed
 
 가격/수하물 추정은 금지합니다.
 
-## 중요한 실제 실험 결과
+## observed-price gate — 통과
 
-사용자 Windows transient probe에서 다음이 확인됐습니다.
+사용자 Windows transient probe:
 
 ```text
 cheapest_fresh_transient_count=24
@@ -54,9 +54,7 @@ round trip
 seen_ms≈435
 ```
 
-즉 Google Flights가 약 0.4초 시점에 실제 가격 row를 DOM에 렌더링했고, 이후 DOM 상태가 바뀌더라도 `MutationObserver`가 해당 row를 보존했습니다.
-
-최종 출력:
+Google Flights가 약 0.4초 시점에 실제 가격 row를 DOM에 렌더링했고 `MutationObserver`가 사라지기 전에 보존했습니다.
 
 ```text
 observed=TRANSIENT_FLIGHT_ROW_CAPTURED
@@ -64,46 +62,87 @@ verified=False
 acceptance=CHEAPEST_OBSERVED_BEFORE_PRICE_UNAVAILABLE
 ```
 
-따라서 **observed-price gate는 통과**했습니다.
+## 첫 auto-click probe에서 발견된 결함
 
-## 현재 Windows live test
+사용자 Windows 결과:
 
 ```text
-flight-bot - test win/02-live-cjj-tpe-visible.cmd
+departure_click_count=1
+departure_selected=922,965 KRW
+return_click_count=0
 ```
 
-현재 `02`는 다음 script를 실행합니다.
+하지만 `departure_row`에는 실제 한 항공편이 아니라:
+
+```text
+Best / Cheapest / Fetching results / Checking prices...
++ Aero K row
++ Korean Air/Asiana rows
++ 여러 CJJ-TPE 항공편
+```
+
+가 한꺼번에 들어 있었습니다.
+
+즉 **출국 선택 성공이 아니라 broad results container 오클릭**입니다. 이 결과는 acceptance로 인정하지 않습니다.
+
+## 현재 수정된 exact-row auto picker
+
+script:
 
 ```text
 scripts/google_booking_probe.py
 ```
 
-흐름:
+Windows:
 
 ```text
-1. canonical CJJ/TPE acceptance URL로 Cheapest tfu URL 확보
-2. 새 문서를 Google JS보다 먼저 감시
-3. CJJ→TPE transient flight rows를 약 140ms debounce 동안 수집
-4. 최저 출국 row를 사라지기 전에 자동 클릭
-5. 화면이 TPE→CJJ rows로 바뀌면 같은 observer가 최저 귀국 row 자동 클릭
-6. Google Booking options / Book/Continue CTA 주변의 KRW 가격만 수집
-7. page-wide KRW minimum은 사용하지 않음
+flight-bot - test win/02-live-cjj-tpe-visible.cmd
 ```
 
-성공 시 예상 출력:
+후보 row 필수 조건:
+
+```text
+요청 route(CJJ-TPE 또는 TPE-CJJ) 정확히 1회
+시간 표현 2~4개
+row 내 KRW 가격 1~3개
+row text <= 2200자
+flight shape marker 존재
+```
+
+여러 항공편을 동시에 포함한 큰 container는 자동 탈락합니다.
+
+transient price element에서 exact row를 찾는 순간:
+
+```text
+data-flight-bot-row-id
+data-flight-bot-target-id
+```
+
+를 실제 DOM에 붙이고 그 동일 target을 클릭합니다. 클릭 시 ancestor를 다시 추정하지 않습니다.
+
+추가 보강:
+
+- candidate settle 약 70ms
+- canonical Cheapest `tfu` URL 직접 open으로 acceptance startup 단축
+- departure→returning phase와 click 기록을 `sessionStorage`에 유지
+- full navigation이 발생해도 returning phase 복원
+- broad-results-container 회귀 테스트 추가
+
+## 다음 live 성공 기준
 
 ```text
 departure_click_count=1
+departure_row_shape=times:2 route_count:1 prices:1 ...
 departure_selected=... KRW
-departure_row=...
+
+auto target/row ID 출력
 
 return_click_count=1
+return_row_shape=times:2 route_count:1 prices:1 ...
 return_selected=... KRW
-return_row=...
 
 booking_options_marker=True
-booking_option_candidates=...
-booking_option_1=... KRW | ...
+booking_option_candidates=>0
 
 === SUMMARY ===
 departure_observed=...
@@ -113,32 +152,32 @@ observed=True
 booking_option_visible=True
 external_checkout_verified=False
 verified=False
-acceptance=GOOGLE_BOOKING_OPTION_REACHED_FROM_TRANSIENT_ROWS
+acceptance=GOOGLE_BOOKING_OPTION_REACHED_FROM_EXACT_TRANSIENT_ROWS
 ```
 
 ## 결과 분기
 
-### A. 출국/귀국 모두 자동 선택 + Booking option 성공
+### A. exact 출국/귀국 선택 + Booking option 성공
 
-다음 gate는 외부 판매처 checkout을 열어 **실제 판매 가능한 최종 total**을 검증하는 것입니다. 그 전까지 `verified=False`와 `REQUIRE_VERIFIED_ALERTS=true`를 유지합니다.
+다음 gate는 외부 판매처 checkout의 실제 final total 검증입니다. 그 전까지 `verified=False`와 `REQUIRE_VERIFIED_ALERTS=true` 유지.
 
-### B. 출국 transient는 잡히지만 `departure_click_count=0`
+### B. exact 출국 row가 0건
 
-row click target/DOM 구조 문제입니다. `auto-click-state-error.json` + `booking-probe-error.*` artifact를 분석해 click target만 수정합니다.
+`departure-selection-failed.*`와 `auto-click-state-departure-failed.json`을 기준으로 exact-row 제한을 조정합니다. broad container fallback은 금지합니다.
 
-### C. 출국은 선택되나 귀국 `return_click_count=0`
+### C. exact 출국은 선택되나 귀국 0건
 
-returning page의 실제 route/row DOM을 artifact로 분석해 TPE→CJJ selector를 보강합니다.
+`return-selection-failed.*` artifact로 실제 returning route/DOM 구조를 확인합니다. broad ancestor 방식으로 되돌리지 않습니다.
 
-### D. 귀국까지 선택되나 booking option 0건
+### D. 귀국까지 선택되나 Booking option 0건
 
-Booking options page의 CTA/price DOM selector를 artifact 기준으로 보강합니다.
+Booking options CTA/price DOM만 보강합니다.
 
 ## GitHub hosted CI 정책
 
-GitHub hosted Windows에서는 Google flight-row 가격 자체가 내려오지 않는 것이 확인됐습니다. 따라서 live Google price는 blocking CI가 아닙니다.
+GitHub hosted Windows에서는 Google flight-row 가격 자체가 내려오지 않는 것이 확인됐으므로 live Google price는 blocking CI가 아닙니다.
 
-일반 CI만 유지:
+일반 CI:
 
 ```text
 Linux Python 3.12 → install → compileall → pytest
