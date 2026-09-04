@@ -1,23 +1,56 @@
-# Flight Bot v0.2 — Google Flights 직접 감시
+# Flight Bot v0.2 — Google Flights 가격 감시
 
 개인 Ubuntu/WSL 홈서버에서 Docker로 실행하는 항공권 가격 감시봇입니다.
 
-## v0.2 핵심 변경
+## 현재 상태 — 2026-09-04
 
-SerpApi 중심 구조를 제거했습니다. 실제 Google Flights 브라우저 화면과 가격 차이가 크게 나는 사례(CJJ→TPE, 2026-09-18~20)가 확인되어, 현재 Primary Provider는 **Playwright + headless Chromium으로 Google Flights를 직접 렌더링**합니다.
+봇/DB/알림 구조는 동작하지만 **Google Flights 실가격 Provider는 migration gate 진행 중**입니다.
 
-`fast-flights`는 가격 공급자가 아니라 Google의 `tfs` 검색 URL을 생성하는 용도로만 사용합니다. Google Flights 검색에서 separate-ticket / self-transfer 결과를 숨기지 않습니다.
+기존 SerpApi는 실제 Google Flights 브라우저 가격과 큰 차이가 확인되어 Primary 후보에서 제거했습니다. 이후 세 가지 직접 접근을 검증했습니다.
 
-## 동작 구조
+```text
+1. Playwright + Google tfs 직링크
+   → 노선/날짜/항공편 목록은 맞음
+   → GitHub hosted runner와 사용자 Windows 일반 회선 모두 Price unavailable
+
+2. fast-flights 3.1 parser / raw payload
+   → parser는 현재 payload에서 IndexError
+   → raw payload에서 RF511/ZE781 등 일부 직항 후보는 가격 대신 다음 단계 token만 반환
+   → 독립 편도 검색의 가격 붙은 결과는 대한항공 다중 경유편으로, 원하는 왕복 최저가와 불일치
+
+3. punitarani/fli direct service API
+   → 최신 GitHub source의 round-trip expansion + GetBookingResults까지 검증
+   → CJJ↔TPE 2026-09-18~20에서 no round-trip results
+   → upstream에도 일반 노선이 no results가 되는 동일 계열 이슈 존재
+   → 브라우저 BotGuard가 없으면 OTA/리셀러 Booking 결과도 축소되는 upstream 보고 존재
+```
+
+따라서 **HTTP-only / tfs 직링크 방식은 현재 Primary 후보에서 제외**했습니다.
+
+현재 acceptance 후보는 `scripts/google_ui_probe.py`입니다. 이 방식은 Google Flights 첫 화면을 실제 브라우저로 열고 출발지/도착지/날짜를 UI에 직접 입력합니다.
+
+Windows visible 테스트는 다음 순서로 실제 브라우저 엔진을 사용합니다.
+
+```text
+Microsoft Edge
+→ Google Chrome
+→ Playwright Chromium
+```
+
+개인 브라우저 프로필은 건드리지 않고 `artifacts/google-profile-win/` 전용 persistent profile을 사용합니다.
+
+**중요:** 현재 runtime `providers.py`는 아직 기존 v0.2 tfs URL Provider입니다. Windows real-UI acceptance에서 가격 표시가 확인되면 다음 작업에서 UI persistent 방식으로 runtime Provider를 교체하고 `fast-flights` 의존성을 제거합니다.
+
+## 핵심 봇 구조
 
 ```text
 APScheduler (기본 08:00 / 20:00 Asia/Seoul)
-  -> Slot 1 -> Chromium 검색 -> DB 저장/목표가 판정
-  -> Slot 2 -> Chromium 검색 -> DB 저장/목표가 판정
-  -> Slot 3 -> Chromium 검색 -> DB 저장/목표가 판정
-
-동시 Chromium 검색은 하지 않고 순차 실행합니다.
+  -> Slot 1 -> Provider 검색 -> DB 저장/목표가 판정
+  -> Slot 2 -> Provider 검색 -> DB 저장/목표가 판정
+  -> Slot 3 -> Provider 검색 -> DB 저장/목표가 판정
 ```
+
+검색은 순차 실행합니다.
 
 - 저장 슬롯은 **정확히 3개(1, 2, 3)** 입니다.
 - `pause`도 슬롯을 차지합니다. `delete`해야 번호가 비며 다음 `add`에서 재사용됩니다.
@@ -27,13 +60,7 @@ APScheduler (기본 08:00 / 20:00 Asia/Seoul)
 - 목표가 위로 다시 올라가면 `ARMED`로 재무장되고, 이후 다시 내려올 때 새 알림이 가능합니다.
 - 알림 전송 코드는 Provider를 호출하지 않습니다.
 - SQLite는 WAL 모드로 사용합니다.
-
-## 가격의 두 단계
-
-1. **Google 표시가**: 검색 결과 화면에 렌더링된 왕복 가격의 최저값.
-2. **Booking 검증가**: ARMED 상태에서 표시가가 목표가 이하일 때만 출국편/귀국편을 선택해 Booking 화면의 `Lowest total price` 검증을 시도합니다.
-
-기본값 `REQUIRE_VERIFIED_ALERTS=true`에서는 Booking 검증에 성공한 경우에만 목표가 알림을 보냅니다. 화면 가격은 검증 실패 여부와 관계없이 history에 저장됩니다.
+- `REQUIRE_VERIFIED_ALERTS=true`가 기본입니다.
 
 ## 명령어
 
@@ -50,28 +77,67 @@ APScheduler (기본 08:00 / 20:00 Asia/Seoul)
 
 `nonstop`을 생략하면 경유/혼합/별도티켓 조합을 허용합니다.
 
-## Docker 실행
+## Windows acceptance test
 
-```bash
-cp .env.example .env          # 환경설정 파일 생성
-docker compose build          # Chromium 포함 이미지 빌드
-docker compose up -d          # -d = detached, 백그라운드 실행
-docker compose logs -f        # 실시간 로그 확인
-```
-
-Chromium의 `/dev/shm` 부족을 피하기 위해 Compose에 `shm_size: 1gb`를 지정했습니다. 브라우저는 검색마다 하나만 실행하며 슬롯은 순차 처리합니다.
-
-## Windows 테스트
-
-저장소 안의 **`flight-bot - test win`** 디렉토리는 Windows 10/11 PowerShell 전용 테스트 하네스입니다. 실제 봇 코드를 복제하지 않고 현재 프로젝트 소스를 그대로 설치해 Windows 호환성을 확인합니다.
+저장소 안의 `flight-bot - test win` 폴더를 사용합니다.
 
 ```text
-01-setup-and-unit-test.cmd       → .venv-win 생성 + 의존성/Chromium 설치 + pytest
-02-live-cjj-tpe-visible.cmd      → Chromium 창을 띄워 CJJ↔TPE 실가격 테스트
-03-live-cjj-tpe-headless.cmd     → 같은 실가격 테스트를 headless로 실행
+01-setup-and-unit-test.cmd
+02-live-cjj-tpe-visible.cmd
 ```
 
-GitHub Actions에도 `windows-latest` unit + Chromium launch 검증을 추가했습니다. 실제 Google 가격은 hosted runner가 아닌 사용자 Windows/WSL/홈서버 IP에서 최종 확인합니다.
+`01`:
+
+```text
+Python 3.12 확인/설치
+→ .venv-win 생성
+→ 의존성 설치
+→ Playwright Chromium 설치
+→ pytest
+```
+
+`02`:
+
+```text
+Google Flights 첫 화면
+→ CJJ 입력
+→ TPE 입력
+→ 2026-09-18 / 2026-09-20 입력
+→ Search
+→ Cheapest
+→ 실제 KRW 가격 후보 수집
+```
+
+성공 판정:
+
+```text
+=== SUMMARY ===
+ui_lowest=... KRW
+acceptance=PRICE_VISIBLE
+```
+
+가격은 실시간으로 변하므로 특정 금액을 강제하지 않습니다. 사용자 일반 브라우저에서 같은 조건으로 약 33만 원대 왕복 결과가 관찰된 적이 있습니다.
+
+디버그 파일:
+
+```text
+artifacts/google-ui-win/cjj-tpe-results.png
+artifacts/google-ui-win/cjj-tpe-results.txt
+artifacts/google-ui-win/cjj-tpe-results.html
+```
+
+실패 시 `cjj-tpe-error.*`가 저장됩니다.
+
+## Docker 실행
+
+실가격 Provider migration gate가 끝난 뒤 운영 배포를 권장합니다. 현재 기본 실행 방법은 다음과 같습니다.
+
+```bash
+cp .env.example .env
+docker compose build
+docker compose up -d
+docker compose logs -f
+```
 
 ## 환경설정
 
@@ -85,56 +151,65 @@ GOOGLE_GL=kr
 REQUIRE_VERIFIED_ALERTS=true
 ```
 
-문제 분석 시에만 `BROWSER_DEBUG_DIR=/debug`를 켜면 스크린샷을 저장합니다.
+runtime Provider를 persistent UI 방식으로 교체할 때 browser profile 설정을 `.env.example`에 정식 반영할 예정입니다.
 
 ## 채널
 
 - Telegram: 조회/명령/능동 알림 지원
 - Discord: 조회/명령/능동 알림 지원
-- Kakao Skill: 현재 요청→응답 webhook만 지원
-- Kakao 능동 알림은 별도 BizMessage/AlimTalk 연동이 필요합니다.
+- Kakao Skill: 요청→응답 webhook만 지원
+- Kakao 능동 알림은 별도 BizMessage/AlimTalk 연동 필요
 
-## CJJ ↔ TPE 검증 시나리오
+## CJJ ↔ TPE acceptance 기준
 
 ```text
-출발: CJJ (청주)
-도착: TPE (타오위안/타이베이)
+출발: CJJ
+도착: TPE
 출국: 2026-09-18
 귀국: 2026-09-20
 성인: 1
 좌석: Economy
 통화: KRW
-경유/별도티켓: 허용
+경유/혼합/별도티켓: 허용
 ```
 
-### 검증 결과
+1차 acceptance는 real browser UI에서 KRW 가격이 실제로 보이고 봇이 가격 후보를 읽는 것입니다.
 
-GitHub-hosted Ubuntu/Azure runner에서는 Chromium이 정확한 CJJ→TPE, 2026-09-18~20 검색 결과와 항공편 목록까지 정상 로드하는 것을 확인했습니다. 그러나 해당 데이터센터 IP/session에는 Google이 모든 운임을 `Price unavailable`로 반환했습니다. 따라서 **실제 가격 acceptance test는 Windows/WSL 또는 최종 Ubuntu 홈서버의 일반 인터넷 회선에서 실행해야 합니다.** 이 상황은 코드에서 `PriceUnavailableError`로 명시적으로 분류하며 가짜 가격을 만들지 않습니다.
+2차 acceptance는 그 중 목표가 이하 후보를 선택해 귀국편/Booking 단계까지 내려가 **실제 판매 가능한 최종 가격**을 검증하는 것입니다.
 
-WSL/Ubuntu에서 실제 가격 검증:
+## CI
 
-```bash
-pip install -e '.[dev]'                              # 프로젝트 + 테스트 의존성 설치
-python -m playwright install --with-deps chromium    # Chromium 및 Linux 의존성 설치
-pytest -q                                             # 단위 테스트
-BROWSER_DEBUG_DIR=artifacts/live-smoke python scripts/live_smoke.py
+일반 push/PR blocking gate:
+
+```text
+Linux Python 3.12
+  → install
+  → compileall src/scripts/tests
+  → pytest
+
+Windows Python 3.12
+  → install
+  → compileall src/scripts/tests
+  → pytest
+  → Playwright Chromium 실제 launch
 ```
 
-Windows에서는 `flight-bot - test win` 폴더의 CMD 파일을 순서대로 실행하면 됩니다.
+실제 Google Flights UI 진단은 데이터센터 IP 특성 때문에 `workflow_dispatch` 수동 job으로만 둡니다.
 
-GitHub Actions의 `cjj-tpe-live-smoke`는 데이터센터 IP 진단용이라 **수동 `workflow_dispatch`에서만 실행**합니다. 일반 push/PR CI는 Linux + Windows unit test를 blocking gate로 사용합니다.
-
-## 테스트
+## 테스트 범위
 
 ```bash
 pip install -e '.[dev]'
+python -m compileall -q src scripts tests
 pytest -q
 ```
 
-테스트 범위: KRW 가격 파싱, 고정 슬롯 1/2/3, pause 점유, delete 후 번호 재사용, SQLite WAL, 목표가 latch/re-arm, ALERTED 상태의 상세검증 억제.
+현재 unit test 범위: KRW 가격 파싱, 고정 슬롯 1/2/3, pause 점유, delete 후 번호 재사용, SQLite WAL, 목표가 latch/re-arm, ALERTED 상태의 상세검증 억제.
 
 ## 주의사항
 
-Google Flights는 공개 개발자 API가 아닙니다. UI/DOM 변경, CAPTCHA, IP 제한으로 scraper가 깨질 수 있습니다. Provider 로직과 봇/DB/알림 로직을 분리해 DOM 변경 시 `providers.py`를 집중 수정할 수 있게 했습니다.
+Google Flights는 공개 개발자 API가 아닙니다. UI/DOM 변경, CAPTCHA, IP/session 제한으로 자동화가 깨질 수 있습니다. 가격을 못 읽었을 때 가짜 값이나 `0원`을 만들지 않고 실패로 처리하는 정책을 유지합니다.
 
-실제 구매 전에는 Google Flights/판매처에서 가격, 수하물, 환불/변경 조건을 다시 확인하세요. 위탁수하물 정보가 확인되지 않으면 봇은 `없음`이라고 추정하지 않고 `정보 확인 불가`로 표시합니다.
+위탁수하물 정보가 확인되지 않으면 `없음`이라고 추정하지 않고 `정보 확인 불가`로 표시합니다.
+
+새 채팅에서 이어갈 때는 `docs/HANDOFF_NEW_CHAT.md`와 `docs/PROJECT_STATUS.md`를 먼저 읽으세요.
