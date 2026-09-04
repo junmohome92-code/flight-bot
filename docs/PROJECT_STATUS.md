@@ -67,11 +67,11 @@ GitHub hosted runner와 사용자 Windows 일반 회선 모두 route/date는 로
 
 UI에서 직접 CJJ/TPE/날짜를 입력했고 결과 URL은 정상적으로 `.../travel/flights/search?...&hl=en&gl=kr&curr=KRW`를 생성했지만 `price_candidates=0`, `Price unavailable`이었습니다.
 
-### 5.2 Native Edge + CDP attach — 실패
+### 5.2 Native Edge + CDP attach 첫 검색 탭 — 실패
 
-실제 `msedge.exe`를 native process로 띄우고 Playwright는 CDP attach만 했지만 자동 검색 결과 탭은 여전히 `Price unavailable`이었습니다.
+실제 `msedge.exe`를 native process로 띄우고 Playwright는 CDP attach만 했지만 자동 검색 결과 탭은 `Price unavailable`이었습니다.
 
-### 5.3 핵심 관찰 — 같은 결과 URL을 사용자가 새 창에서 직접 열면 가격 표시
+### 5.3 같은 결과 URL을 사용자가 새 창에서 직접 열면 가격 표시
 
 사용자 확인:
 
@@ -82,58 +82,81 @@ UI에서 직접 CJJ/TPE/날짜를 입력했고 결과 URL은 정상적으로 `..
 → 가격 정상 표시
 ```
 
-따라서 현재 판단:
+이 관찰 때문에 generated URL을 fresh tab에서 다시 여는 방식으로 gate를 전환했습니다.
+
+### 5.4 자동 fresh tab 가격 렌더링 — 성공, 최저가 탭 선택은 실패 확인
+
+2026-09-04 사용자 Windows 실측:
 
 ```text
-검색 조건/URL 생성: 정상
-route/date: 정상
-gl=kr / curr=KRW: 정상
-문제 지점: 처음 자동 검색을 수행한 탭/세션의 결과 로딩 상태
+fresh_tab_attempt=1
+navigator_webdriver=False
+footer_location=South Korea
+footer_currency=KRW
+price_candidates=2
+887,003 KRW
+1,270,502 KRW
 ```
 
-## 6. 현재 acceptance — generated URL → fresh new tab
+즉 **Playwright/CDP가 붙은 fresh tab에서도 실제 KRW flight-row 가격 렌더링은 성공**했습니다. 따라서 이전의 `Price unavailable` 문제는 fresh navigation으로 우회 가능한 근거가 생겼습니다.
 
-`scripts/google_ui_probe.py`는 다음 순서입니다.
+하지만 같은 화면에서 사용자가 확인한 Google Flights UI에는 별도 `추천` / `최저가` 탭이 있었고 `최저가` 탭에는 약 `₩338,121부터`가 표시됐습니다. 기존 probe는 `get_by_text("Cheapest", exact=True)`만 사용했기 때문에 한국어 `최저가` 탭을 클릭하지 못했고, 기본 `추천` 탭 가격을 읽고도 `PRICE_VISIBLE_AFTER_FRESH_TAB`을 출력했습니다.
+
+따라서 이 결과는 **browser price-render gate 성공**이지 **실제 최저가 acceptance 성공은 아닙니다.** runtime Provider migration은 아직 시작하지 않습니다.
+
+## 6. 현재 acceptance — fresh tab + localized Cheapest/최저가 확인
+
+`scripts/google_ui_probe.py` 현재 흐름:
 
 ```text
 1. native Edge + dedicated profile 실행
 2. 첫 탭에서 Google Flights UI 직접 입력
-3. 생성된 최종 /travel/flights/search URL 확보
+3. 생성된 /travel/flights/search URL 확보
 4. 동일 Edge context에서 새 탭 생성
-5. 정확히 같은 URL을 fresh navigation
-6. Cheapest / More flights 필요 시 적용
-7. flight-row scoped KRW 가격만 읽기
-8. 실패 시 여러 fresh tab 반복
+5. 동일 URL fresh navigation
+6. Cheapest / 최저가 탭을 영어·한국어 모두 탐색
+7. 탭 클릭 여부와 탭 광고 최저가(예: ₩338,121부터) 기록
+8. More flights / 항공편 더보기 필요 시 확장
+9. flight-row scoped KRW 가격만 읽기
+10. 탭 광고 최저가보다 row parser 최저가가 비싸면 acceptance 거부
+11. 실패 시 여러 fresh tab 반복
 ```
 
-### 6.1 2026-09-04 probe hardening
-
-현재 main 검수에서 acceptance 오판 가능성을 제거했습니다.
+### 6.1 probe hardening
 
 - page body 전체의 KRW 최소값 fallback 제거
-- `li` / `role=listitem` / `role=button` 중 실제 flight-row 형태만 가격 후보로 인정
-- fresh tab에서 결과 shell이 먼저 뜬 뒤 가격이 늦게 채워질 수 있으므로 row 가격을 기본 15초 추가 대기
-- `generated_search_url`, `fresh_url`, `price_candidates` 출력 유지
-- 실패 진단에 URL / `navigator.webdriver` / language / timezone / Footer Language·Location·Currency 포함
+- 가격 element에서 최대 12단계 ancestor를 올라가 실제 flight-row 형태를 찾도록 보강
+- `aria-label`뿐 아니라 visible KRW text도 row-shaped ancestor가 확인된 경우에만 가격 후보 인정
+- 한국어 `최저가`, `항공편 더보기`, 결과 section marker 지원
+- fresh tab에서 가격이 늦게 채워질 수 있으므로 row 가격 기본 15초 추가 대기
+- `generated_search_url`, `fresh_url`, `price_candidates` 출력
+- URL / `navigator.webdriver` / language / timezone / Footer Language·Location·Currency 진단 유지
 - screenshot / body text / HTML artifact 유지
-- pure helper unit test 추가
+- localized cheapest-tab 및 가격 일치 helper unit test 추가
 
-아직 사용자 Windows에서 이 hardening 버전의 live acceptance 결과는 **미확인**입니다.
-
-성공 기준:
+성공 기준은 이제 더 엄격합니다.
 
 ```text
+cheapest_tab_found=True
+cheapest_tab_clicked=True
+cheapest_advertised=... KRW
+price_candidates=...
+cheapest_row_lowest=... KRW
+cheapest_price_match=True
+
 === SUMMARY ===
 fresh_tab_attempt=N
 ui_lowest=... KRW
-acceptance=PRICE_VISIBLE_AFTER_FRESH_TAB
+acceptance=CHEAPEST_PRICE_VISIBLE_AFTER_FRESH_TAB
 ```
+
+`render_gate=PRICE_VISIBLE_AFTER_FRESH_TAB`은 fresh tab에서 가격 렌더링 자체가 됐다는 중간 증거일 뿐, 최종 acceptance가 아닙니다.
 
 ## 7. 현재 중요한 경계
 
 `src/flight_bot/providers.py` runtime Provider는 아직 기존 v0.2 `tfs URL + Playwright` 구현입니다.
 
-**fresh-new-tab acceptance가 실제 가격을 반환하기 전에는 runtime Provider를 교체하지 않습니다.**
+**`CHEAPEST_PRICE_VISIBLE_AFTER_FRESH_TAB`이 실제 사용자 Windows에서 확인되기 전에는 runtime Provider를 교체하지 않습니다.**
 
 현재 상태:
 
@@ -141,45 +164,35 @@ acceptance=PRICE_VISIBLE_AFTER_FRESH_TAB
 Bot Core: usable
 DB/latch: usable
 Windows/Linux unit CI: usable
+Fresh-tab price rendering: confirmed on user Windows
+Localized cheapest-tab extraction: current gate
 Runtime Google price Provider: migration pending
-Generated-URL fresh-tab probe: current acceptance candidate
 ```
 
 ## 8. CI 상태/정책
 
-2026-09-04 기준 이전 HEAD `8621a40`의 GitHub Actions run `33838752221`은 완료 `success`였습니다.
+최종 live Google Flights acceptance는 GitHub hosted runner가 아니라 사용자 Windows의 `02-live-cjj-tpe-visible.cmd`로 수행합니다.
 
-- `unit-linux`: success
-- `unit-windows`: success
-- hosted `cjj-tpe-ui-diagnostic`: push에서는 skipped
+기존 manual diagnostic job은 Windows-visible 전용 probe를 Ubuntu/headless에서 실행하도록 되어 있어 제거했습니다. 일반 CI는 Linux/Windows Python 3.12 compile/test와 Windows Playwright Chromium launch를 검증합니다.
 
-기존 manual diagnostic job은 Windows-visible 전용 probe를 Ubuntu/headless에서 실행하도록 되어 있어 실제 `workflow_dispatch` 시 유효한 acceptance가 될 수 없었습니다. 이 job은 제거했고, 실제 Google Flights acceptance는 사용자 Windows의 `02-live-cjj-tpe-visible.cmd`로만 수행합니다.
+## 9. fresh tab도 자동화에서 다시 막히면 다음 분기
 
-## 9. fresh tab도 자동화에서 실패하면 다음 분기
+현재는 자동 fresh tab에서 실제 가격 렌더링까지 확인됐으므로 browser extension sidecar 분기는 우선순위가 낮아졌습니다.
 
-사용자가 동일 URL을 수동 새 창에서 열면 가격이 보이는데 `context.new_page()`에서는 계속 `Price unavailable`이면, 차이는 URL이 아니라 **자동화가 붙어 있는 browser context**입니다.
-
-그 경우 다음 Primary 후보는 Playwright를 더 숨기는 방식이 아니라 **일반 사용자 브라우저 안에서 동작하는 browser extension/content-script sidecar**입니다.
-
-```text
-일반 Edge/Chrome profile
-→ extension이 Google Flights URL을 새 탭으로 열기
-→ 실제 DOM에서 가격 읽기
-→ localhost flight-bot API로 결과 전달
-```
-
-stealth/CAPTCHA/BotGuard 우회를 기본 전략으로 넣지 않습니다.
+다만 향후 일반 브라우저에서는 가격이 나오는데 자동 fresh tab에서 다시 지속적으로 `Price unavailable`이 발생한다면 일반 사용자 브라우저 extension/content-script sidecar를 대안으로 검토합니다. stealth/CAPTCHA/BotGuard 우회를 기본 전략으로 넣지 않습니다.
 
 ## 10. acceptance 성공 후
 
-1. runtime Provider를 검증된 방식으로 교체
+1. runtime Provider를 검증된 fresh-tab 방식으로 교체
 2. 페이지 전체 min이 아닌 실제 flight row 가격만 비교
-3. 최저 출국 후보 → 귀국 후보 → Booking 최종가격 검증
-4. observed와 verified를 구분
-5. `REQUIRE_VERIFIED_ALERTS=true` 유지
-6. fast-flights dependency 제거
-7. Docker/Ubuntu 또는 browser-sidecar 운영구조 결정
-8. Windows/Linux tests + live acceptance 재검증
+3. 최저 출국 후보 클릭
+4. 귀국 후보 선택
+5. Booking / final price 단계 검증
+6. 표시 가격은 `observed`, Booking 검증 가격만 `verified`
+7. `REQUIRE_VERIFIED_ALERTS=true` 유지
+8. fast-flights dependency 제거
+9. Docker/Ubuntu 또는 browser-sidecar 운영구조 결정
+10. Windows/Linux tests + live acceptance 재검증
 
 ## 11. 이후 구조 개선
 
