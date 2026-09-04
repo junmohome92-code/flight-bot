@@ -14,9 +14,9 @@ docs/HANDOFF_NEW_CHAT.md
 
 ## 2. 현재 한 줄 요약
 
-**봇 Core는 살아 있고 Google Flights fresh-tab 가격 렌더링은 성공했으며, 현재 gate는 한국어 `최저가` 탭을 실제로 선택해 약 33만 원대 최저 row를 읽는 단계입니다.**
+**봇 Core는 살아 있고 base fresh search URL에서 가격 렌더링 사례도 확인됐지만, Cheapest/최저가 클릭으로 현재 문서가 전환되면 다시 `Price unavailable`이 발생합니다. 현재 gate는 Cheapest 클릭 후 생긴 `tfu` URL을 또 다른 fresh tab에서 다시 여는 것입니다.**
 
-SerpApi / fast-flights parser / Fli direct API / tfs 직링크 방식은 이미 실패 근거가 있으므로 반복하지 않습니다.
+SerpApi / fast-flights parser / Fli direct API / 기존 tfs 직링크 방식은 반복하지 않습니다.
 
 ## 3. 기준 acceptance
 
@@ -29,113 +29,122 @@ KRW
 all stops / mixed airlines / separate style results allowed
 ```
 
-사용자 일반 브라우저에서는 같은 조건으로 약 33만 원대 왕복 결과가 관찰됐습니다. 실시간 값이므로 특정 숫자를 고정 acceptance로 사용하지 않습니다.
+사용자 일반 브라우저에서는 같은 조건으로 약 33만 원대 왕복 결과가 실제 표시됐습니다. 실시간 값이므로 특정 가격을 고정 acceptance로 사용하지 않습니다.
 
 ## 4. 핵심 실험 결과
 
 ### 첫 자동 검색 탭
 
-Playwright-launched Edge와 native Edge + CDP attach 모두 첫 자동 검색 탭에서는 `Price unavailable`이 발생했습니다.
+Playwright-launched Edge와 native Edge + CDP attach 모두 첫 검색 결과 문서에서는 `Price unavailable`이 발생했습니다.
 
-### 수동 fresh window
+### generated URL fresh navigation
 
-자동화가 만든 search URL을 사용자가 새 창/새 탭에서 직접 열면 가격이 정상 표시됐습니다.
+사용자가 자동화가 만든 search URL을 새 창에서 직접 열면 가격이 정상 표시됐습니다. 이후 자동 `context.new_page()`에서도 실제 KRW flight-row 가격이 렌더링되는 사례가 확인됐습니다.
 
-### 자동 fresh tab — 가격 렌더링 성공
-
-2026-09-04 사용자 Windows 실측:
+예:
 
 ```text
-fresh_tab_attempt=1
-navigator_webdriver=False
-footer_location=South Korea
-footer_currency=KRW
 price_candidates=2
 887,003 KRW
 1,270,502 KRW
+navigator_webdriver=False
+footer_location=South Korea
+footer_currency=KRW
 ```
 
-따라서 **동일 URL을 `context.new_page()`에서 fresh navigation하면 자동화된 Edge에서도 실제 KRW flight-row 가격이 렌더링될 수 있음이 확인됐습니다.**
+### 추천/최저가 탭 문제
 
-하지만 사용자가 첨부한 화면에는 `추천`과 `최저가 ₩338,121부터` 탭이 따로 있었고, 기존 probe는 `Cheapest` 영문 exact text만 찾아 한국어 `최저가` 탭을 클릭하지 못했습니다. 그 결과 추천 탭 가격을 읽고도 `PRICE_VISIBLE_AFTER_FRESH_TAB`을 출력했습니다.
+사용자 일반 Google Flights 화면에는 `추천`과 `최저가 ₩338,121부터`가 별도 탭으로 표시됐습니다. 기존 probe가 추천 탭 가격을 최저가로 오인한 문제는 수정했습니다.
 
-이전 출력은 **render gate 성공**으로만 인정하며, 실제 최저가 acceptance 성공으로 보지 않습니다.
+현재 `Cheapest` / `최저가` 모두 탐색하고, 탭의 advertised cheapest와 row lowest를 비교합니다.
 
-## 5. 현재 코드
-
-`scripts/google_ui_probe.py`는 이제 다음 순서입니다.
+### 최신 사용자 Windows 결과
 
 ```text
-native Edge + dedicated profile
-→ 첫 탭에서 Google Flights UI 직접 검색
-→ generated_search_url 출력
-→ 동일 context NEW TAB
-→ generated_search_url fresh goto
-→ Cheapest / 최저가 영어·한국어 selector 탐색
-→ 탭 클릭 여부 기록
-→ 탭에 표시된 광고 최저가(예: ₩338,121부터) 추출
-→ More flights / 항공편 더보기 필요 시 적용
-→ row-scoped KRW 가격 수집
-→ advertised cheapest보다 row parser 최저가가 비싸면 acceptance 거부
-```
-
-추가 hardening:
-
-- body 전체 KRW minimum fallback 없음
-- price element에서 ancestor를 최대 12단계 올라가 flight-row shape를 찾음
-- visible KRW text도 flight-row ancestor가 확인된 경우에만 수집
-- 한국어 `최저가`, `항공편 더보기`, 결과 section marker 지원
-- 기본 15초 row-price wait
-- Footer Language/Location/Currency + navigator.webdriver/language/timezone + URL 진단
-- `generator-tab`, `fresh-tab-N`, error screenshot/txt/html artifact 유지
-
-runtime `src/flight_bot/providers.py`는 아직 기존 tfs URL Provider입니다. **아직 runtime migration 하지 않았습니다.**
-
-## 6. 사용자가 다음에 할 작업
-
-최신 `main`을 받은 뒤:
-
-```text
-flight-bot - test win
-└─ 02-live-cjj-tpe-visible.cmd
-```
-
-`.venv-win`이 이미 있으면 01은 생략 가능합니다.
-
-이번 성공 기준은 다음입니다.
-
-```text
-generated_search_url=...
-
-=== FRESH TAB ATTEMPT N ===
-fresh_url=...
 cheapest_tab_found=True
-cheapest_tab_text=최저가 ...
-cheapest_advertised=... KRW
+cheapest_tab_text=Cheapest ... ₩338,121
+cheapest_advertised=338,121 KRW
 cheapest_tab_clicked=True
+cheapest_tab_aria_selected=true
+price_candidates=0
+fresh_tab_1_price_unavailable=True
+```
+
+3회 모두 같은 계열 결과였습니다.
+
+즉 탭 selector는 이제 맞지만 **Cheapest 클릭으로 전환된 현재 문서에서는 실제 row price가 사라집니다.** parser만의 문제로 보지 않습니다.
+
+## 5. GitHub hosted Windows 실제 테스트
+
+사용자 요청으로 GitHub Actions `windows-latest`에서 native Edge 실험을 직접 수행했습니다.
+
+- landing page는 정상 로드됨
+- 초기 selector race 한 건 확인
+- 사용자 generated URL 직접 open 성공
+- Cheapest 탐지/클릭 성공
+- hosted 환경에서는 `Price unavailable=True`
+- DOM price-node dump에서 실제 flight-row KRW node는 0개
+- Cheapest 클릭 후 `tfu` URL을 또 다른 fresh tab에서 열어도 hosted 환경에서는 `Price unavailable=True`
+
+따라서 GitHub 데이터센터 runner는 live price acceptance 환경으로 사용할 수 없습니다. GitHub에서 parser가 놓친 것이 아니라 실제 화면 row가 내려오지 않는 상태였습니다.
+
+임시 hosted live diagnostic job은 실험 종료 후 제거했고 일반 CI만 유지합니다.
+
+## 6. 현재 코드 / 다음 Windows 테스트
+
+새 acceptance script:
+
+```text
+scripts/google_cheapest_fresh_probe.py
+```
+
+`flight-bot - test win/02-live-cjj-tpe-visible.cmd`는 이제 이 script를 실행합니다.
+
+흐름:
+
+```text
+INITIAL TAB
+Google Flights UI 입력
+→ generated_search_url
+
+BASE FRESH TAB
+generated_search_url fresh open
+→ Cheapest / 최저가 클릭
+→ cheapest_transition_url (= tfu URL) 확보
+
+CHEAPEST FRESH TAB
+cheapest_transition_url을 ANOTHER fresh page에서 open
+→ flight-row scoped KRW 가격 수집
+→ advertised cheapest와 row lowest 비교
+```
+
+성공 기준:
+
+```text
+cheapest_transition_url=...&tfu=...
+
+=== CHEAPEST URL FRESH TAB N ===
+cheapest_fresh_price_unavailable=False
 price_candidates=...
 #1 ... KRW | 항공사/시간/경유정보
-render_gate=PRICE_VISIBLE_AFTER_FRESH_TAB
-cheapest_tab_ready=True
 cheapest_price_match=True
-cheapest_row_lowest=... KRW
 
 === SUMMARY ===
 fresh_tab_attempt=N
 ui_lowest=... KRW
-acceptance=CHEAPEST_PRICE_VISIBLE_AFTER_FRESH_TAB
+acceptance=CHEAPEST_PRICE_VISIBLE_AFTER_SECOND_FRESH_TAB
 ```
 
-`cheapest_advertised`가 약 33만 원인데 `cheapest_row_lowest`가 40만/80만 원대로 나오면 selector 또는 row parser가 아직 잘못된 것이므로 acceptance는 실패해야 합니다.
+`.venv-win`이 이미 있으면 01은 다시 실행할 필요 없습니다.
 
 ## 7. 결과 분기
 
-### A. `CHEAPEST_PRICE_VISIBLE_AFTER_FRESH_TAB`
+### A. `CHEAPEST_PRICE_VISIBLE_AFTER_SECOND_FRESH_TAB`
 
-이때 runtime Provider migration을 시작합니다.
+runtime Provider migration을 시작합니다.
 
-1. fresh-tab browser lifecycle 반영
-2. 실제 flight-row scoped observed price
+1. 검증된 browser/fresh-tab lifecycle 반영
+2. actual flight-row observed price 추출
 3. 최저 출국 후보 클릭
 4. returning flights 이동
 5. 귀국 후보 선택
@@ -146,38 +155,56 @@ acceptance=CHEAPEST_PRICE_VISIBLE_AFTER_FRESH_TAB
 10. Docker/Ubuntu 운영구조 검증
 11. tests/docs 갱신
 
-### B. `cheapest_tab_found=False`
+### B. second-fresh에서도 `Price unavailable`
 
-`fresh-tab-N.html/txt` 기준으로 한국어/DOM selector를 보강합니다.
+사용자 일반 Edge/Chrome은 정상인데 CDP가 붙은 두 번째 fresh tab까지 계속 실패하는 상태입니다. 이 경우 URL/reload 실험을 더 반복하지 않고 **일반 사용자 브라우저 extension/content-script sidecar**를 다음 Primary 후보로 평가합니다.
 
-### C. `cheapest_tab_clicked=True`인데 `cheapest_price_match=False`
+```text
+일반 Edge/Chrome
+→ extension/content script가 Google Flights 실제 row DOM 읽기
+→ localhost flight-bot API로 전달
+```
 
-탭 클릭 자체는 됐지만 row parser가 탭의 광고 최저가 row를 놓친 것입니다. price element의 ancestor 구조를 artifact HTML로 분석해 row-scoped parser만 보강합니다.
+stealth/BotGuard 우회를 기본 전략으로 하지 않습니다.
 
-### D. 다시 `Price unavailable`
+### C. second-fresh 화면에는 가격이 보이는데 `price_candidates=0`
 
-동일 URL fresh navigation이 일시적으로 실패한 것입니다. 여러 fresh tab 결과와 세션 진단을 비교합니다. 일반 브라우저만 계속 성공하고 자동 context가 지속 실패할 때만 extension/content-script sidecar를 다시 검토합니다.
+그때는 실제 parser 문제입니다. `cheapest-fresh-N.html/txt/png`를 기준으로 row-scoped selector만 보강합니다.
 
-## 8. CI
+## 8. runtime 주의
 
-실제 live Google Flights acceptance는 사용자 Windows에서 수행합니다. GitHub 일반 CI는 Linux/Windows Python 3.12 compile/test와 Windows Playwright Chromium launch를 검증합니다.
+현재 `src/flight_bot/providers.py`는 여전히 기존 v0.2 tfs URL + Playwright Provider입니다.
 
-## 9. 이미 확인한 실패 경로 — 반복 금지
+**second-fresh live acceptance 성공 전에는 runtime Provider를 교체하거나 완료라고 말하지 않습니다.**
 
-- SerpApi: 브라우저 대비 비싼 결과 / 저렴한 혼합·별도티켓 누락 사례
-- tfs 직링크 + Playwright: 첫 자동 탭에서 hosted + Windows `Price unavailable`
-- fast-flights 3.1: parser `IndexError`, 일부 가격 대신 token
-- Fli direct API commit `121d34f...`: CJJ↔TPE no-results; upstream no-results/BotGuard limitations
+## 9. CI
 
-## 10. 유지 요구사항
+일반 CI:
+
+```text
+Linux Python 3.12 → install → compileall → pytest
+Windows Python 3.12 → install → compileall → pytest → Playwright Chromium launch
+```
+
+실제 Google Flights live price는 GitHub hosted CI의 blocking gate로 사용하지 않습니다.
+
+## 10. 반복 금지
+
+- SerpApi를 Primary로 복원하지 말 것
+- fast-flights parser를 가격 source로 복원하지 말 것
+- Fli direct API를 재채택하지 말 것
+- 기존 direct tfs URL 접근을 다시 Primary로 쓰지 말 것
+- 가격/수하물 추정 금지
+- 위탁수하물 미확인 = `정보 확인 불가`
+
+## 11. 유지 요구사항
 
 - 슬롯 정확히 3개
 - pause 슬롯 점유 / delete 해제
 - target_price 기준 알림
 - ARMED → 하향 돌파 1회 → ALERTED → 위로 복귀 시 re-arm
-- 반복 알림 금지
+- 동일 below-target 구간 반복 알림 금지
 - notifier가 Provider 호출 금지
 - SQLite WAL
 - 검색 순차 실행
-- 가격/수하물 추정 금지
-- 위탁수하물 미확인 = `정보 확인 불가`
+- `REQUIRE_VERIFIED_ALERTS=true`
