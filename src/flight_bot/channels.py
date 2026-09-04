@@ -10,21 +10,39 @@ from .config import Settings
 from .service import FlightService
 
 
+class NotificationUnavailableError(RuntimeError):
+    pass
+
+
 class MultiNotifier:
     def __init__(self):
         self.telegram_app: Application | None = None
         self.discord_client: discord.Client | None = None
 
     async def send(self, platform: str, recipient_id: str, text: str) -> None:
-        if platform == "telegram" and self.telegram_app:
+        if platform == "telegram":
+            if not self.telegram_app:
+                raise NotificationUnavailableError("Telegram notifier is not connected")
             await self.telegram_app.bot.send_message(chat_id=int(recipient_id), text=text)
             return
-        if platform == "discord" and self.discord_client:
-            channel = self.discord_client.get_channel(int(recipient_id)) or await self.discord_client.fetch_channel(int(recipient_id))
+
+        if platform == "discord":
+            if not self.discord_client:
+                raise NotificationUnavailableError("Discord notifier is not connected")
+            channel = self.discord_client.get_channel(int(recipient_id))
+            if channel is None:
+                channel = await self.discord_client.fetch_channel(int(recipient_id))
             await channel.send(text)
             return
-        # Kakao proactive push requires a separate BizMessage/AlimTalk provider.
-        print(f"[kakao-pending] recipient={recipient_id} {text}")
+
+        if platform == "kakao":
+            # Kakao Skill is reactive only.  Proactive notification requires a
+            # separate BizMessage/AlimTalk integration; printing is not delivery.
+            raise NotificationUnavailableError(
+                "Kakao proactive notification is not configured (BizMessage/AlimTalk required)"
+            )
+
+        raise NotificationUnavailableError(f"Unsupported notification platform: {platform}")
 
 
 async def build_telegram(settings: Settings, service: FlightService, notifier: MultiNotifier):
