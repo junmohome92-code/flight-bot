@@ -27,11 +27,13 @@
 
 따라서 **HTTP-only / tfs 직링크 방식은 현재 Primary 후보에서 제외**했습니다.
 
-현재 acceptance 후보는 `scripts/google_ui_probe.py`입니다. 이 방식은 Google Flights 첫 화면을 실제 브라우저로 열고 출발지/도착지/날짜를 UI에 직접 입력합니다.
+현재 acceptance 후보는 `scripts/google_ui_probe.py`입니다. 이 방식은 Google Flights 첫 화면을 실제 브라우저로 열고 출발지/도착지/날짜를 UI에 직접 입력한 뒤, 생성된 search URL을 fresh tab에서 다시 엽니다.
 
 Windows visible 테스트는 **native Microsoft Edge + 전용 persistent profile**을 사용합니다. 개인 브라우저 프로필은 건드리지 않고 `artifacts/google-profile-win/`을 사용합니다.
 
-**중요:** 현재 runtime `providers.py`는 아직 기존 v0.2 tfs URL Provider입니다. Windows real-UI acceptance에서 가격 표시가 확인되면 다음 작업에서 검증된 방식으로 runtime Provider를 교체하고 `fast-flights` 의존성을 제거합니다.
+2026-09-04 사용자 Windows에서 **fresh tab의 실제 KRW 가격 렌더링은 성공**했습니다. 다만 UI가 한국어 `추천` / `최저가` 탭으로 렌더링됐고 기존 영문 exact selector가 `최저가` 탭을 누르지 못해 추천 가격을 최저가로 오판했습니다. 현재 코드는 `Cheapest`와 `최저가`를 모두 인식하고 탭 광고 가격과 row parser 최저가까지 교차검증하도록 보강했습니다.
+
+**중요:** 현재 runtime `providers.py`는 아직 기존 v0.2 tfs URL Provider입니다. `CHEAPEST_PRICE_VISIBLE_AFTER_FRESH_TAB`이 사용자 Windows에서 확인된 뒤 runtime Provider migration을 시작합니다.
 
 ## 핵심 봇 구조
 
@@ -98,28 +100,43 @@ Google Flights 첫 화면
 → Search
 → generated_search_url 저장
 → 동일 browser context에 fresh NEW tab 생성
-→ generated_search_url을 fresh navigation
-→ Cheapest 필요 시 선택
-→ More flights 필요 시 확장
+→ generated_search_url fresh navigation
+→ Cheapest / 최저가 탭 탐색 및 클릭
+→ 탭에 표시된 advertised cheapest 추출
+→ More flights / 항공편 더보기 필요 시 확장
 → flight-row에 붙은 KRW 가격만 수집
+→ advertised cheapest와 row parser 최저가 교차검증
 ```
 
 페이지 전체에서 보이는 원화 숫자의 최소값을 fallback으로 사용하지 않습니다.
 
-성공 판정:
+현재 중간 증거:
+
+```text
+render_gate=PRICE_VISIBLE_AFTER_FRESH_TAB
+```
+
+이 값은 fresh tab에서 실제 가격이 렌더링됐다는 뜻일 뿐 최저가 acceptance 완료를 의미하지 않습니다.
+
+최종 성공 판정:
 
 ```text
 generated_search_url=...
 === FRESH TAB ATTEMPT N ===
 fresh_url=...
+cheapest_tab_found=True
+cheapest_tab_clicked=True
+cheapest_advertised=... KRW
 price_candidates=...
+cheapest_row_lowest=... KRW
+cheapest_price_match=True
 === SUMMARY ===
 fresh_tab_attempt=N
 ui_lowest=... KRW
-acceptance=PRICE_VISIBLE_AFTER_FRESH_TAB
+acceptance=CHEAPEST_PRICE_VISIBLE_AFTER_FRESH_TAB
 ```
 
-가격은 실시간으로 변하므로 특정 금액을 강제하지 않습니다. 사용자 일반 브라우저에서 같은 조건으로 약 33만 원대 왕복 결과가 관찰된 적이 있습니다.
+가격은 실시간으로 변하므로 특정 금액을 강제하지 않습니다. 사용자 화면에서는 같은 조건으로 `최저가 ₩338,121부터`가 관찰된 적이 있습니다.
 
 디버그 파일:
 
@@ -177,9 +194,9 @@ runtime Provider를 persistent UI 방식으로 교체할 때 browser profile 설
 경유/혼합/별도티켓: 허용
 ```
 
-1차 acceptance는 real browser UI의 fresh tab에서 KRW 가격이 실제로 보이고 봇이 **flight-row scoped observed price**를 읽는 것입니다.
+1차 acceptance는 fresh tab에서 `Cheapest/최저가` 탭의 실제 flight-row scoped observed lowest price를 읽고, 탭에 광고된 lowest와 일관됨을 확인하는 것입니다.
 
-2차 acceptance는 그 중 목표가 이하 후보를 선택해 귀국편/Booking 단계까지 내려가 **실제 판매 가능한 최종 가격**을 검증하는 것입니다.
+2차 acceptance는 그 후보를 선택해 귀국편/Booking 단계까지 내려가 **실제 판매 가능한 최종 가격**을 검증하는 것입니다.
 
 `observed`와 `verified`를 혼동하지 않습니다.
 
@@ -210,7 +227,7 @@ python -m compileall -q src scripts tests
 pytest -q
 ```
 
-현재 unit test 범위: KRW 가격 파싱, Google UI probe row-scope/diagnostic helper, 고정 슬롯 1/2/3, pause 점유, delete 후 번호 재사용, SQLite WAL, 목표가 latch/re-arm, ALERTED 상태의 상세검증 억제.
+현재 unit test 범위: KRW 가격 파싱, Google UI probe row-scope/localized cheapest-tab/diagnostic helper, 고정 슬롯 1/2/3, pause 점유, delete 후 번호 재사용, SQLite WAL, 목표가 latch/re-arm, ALERTED 상태의 상세검증 억제.
 
 ## 주의사항
 
