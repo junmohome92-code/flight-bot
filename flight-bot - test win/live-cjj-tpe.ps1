@@ -11,17 +11,21 @@ if (-not (Test-Path $VenvPython)) {
     throw 'Run setup-and-unit-test.ps1 first. .venv-win was not found.'
 }
 
-$env:BROWSER_DEBUG_DIR = (Join-Path $RepoRoot 'artifacts\live-smoke-win')
-$env:BROWSER_HEADLESS = if ($Headless) { 'true' } else { 'false' }
-
-Write-Host 'Live Google Flights smoke test'
+Write-Host 'Direct Google Flights data probe'
 Write-Host '  CJJ -> TPE'
 Write-Host '  2026-09-18 ~ 2026-09-20'
-Write-Host "  Chromium headless: $($env:BROWSER_HEADLESS)"
-Write-Host "  Screenshots: $($env:BROWSER_DEBUG_DIR)"
+Write-Host '  1 adult / Economy / KRW'
+Write-Host '  separate ticket / self-transfer: allowed'
+Write-Host ''
+Write-Host 'This test does NOT use the Playwright DOM parser.'
+Write-Host 'It compares round-trip pricing with two independent one-way searches.'
 Write-Host ''
 
-& $VenvPython 'scripts\live_smoke.py'
+& $VenvPython 'scripts\fast_flights_probe.py'
 if ($LASTEXITCODE -ne 0) {
-    throw "Live smoke failed with exit code $LASTEXITCODE. Check artifacts\live-smoke-win for screenshots."
+    throw "Direct fast-flights probe failed with exit code $LASTEXITCODE."
 }
+
+Write-Host ''
+Write-Host 'Probe complete.'
+Write-Host 'Paste the ROUND TRIP / ONE WAY / SUMMARY output back into ChatGPT.'
