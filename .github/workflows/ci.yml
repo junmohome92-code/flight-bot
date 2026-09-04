@@ -33,32 +33,3 @@ jobs:
         run: |
           python -m playwright install chromium
           python -c "import asyncio; from playwright.async_api import async_playwright; exec('async def t():\n    p=await async_playwright().start()\n    b=await p.chromium.launch(headless=True)\n    print(b.version)\n    await b.close()\n    await p.stop()\nasyncio.run(t())')"
-
-  cjj-tpe-ui-diagnostic:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -e .
-      - run: python -m playwright install --with-deps chromium
-      - name: Google Flights UI CJJ-TPE 2026-09-18..20
-        env:
-          BROWSER_HEADLESS: "true"
-          BROWSER_DEBUG_DIR: artifacts/google-ui-ci
-          BROWSER_PROFILE_DIR: artifacts/google-profile-ci
-          BROWSER_KEEP_OPEN_SECONDS: "0"
-        run: |
-          set -o pipefail
-          python scripts/google_ui_probe.py | tee artifacts-ui-result.txt
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: cjj-tpe-ui-diagnostic
-          path: |
-            artifacts-ui-result.txt
-            artifacts/google-ui-ci/
-          if-no-files-found: ignore
