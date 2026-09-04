@@ -14,11 +14,9 @@ docs/HANDOFF_NEW_CHAT.md
 
 ## 2. 현재 한 줄 요약
 
-**봇 Core는 살아 있고 Google Flights 실가격 Provider만 migration gate 진행 중입니다.**
+**봇 Core는 살아 있고 Google Flights fresh-tab 가격 렌더링은 성공했으며, 현재 gate는 한국어 `최저가` 탭을 실제로 선택해 약 33만 원대 최저 row를 읽는 단계입니다.**
 
 SerpApi / fast-flights parser / Fli direct API / tfs 직링크 방식은 이미 실패 근거가 있으므로 반복하지 않습니다.
-
-현재 gate는 **Google Flights UI로 검색 URL 생성 → 동일 URL을 새 탭에서 fresh open → flight-row 가격 읽기**입니다.
 
 ## 3. 기준 acceptance
 
@@ -31,56 +29,67 @@ KRW
 all stops / mixed airlines / separate style results allowed
 ```
 
-사용자 일반 브라우저에서는 같은 조건으로 약 33만 원대 왕복 결과가 관찰된 적이 있습니다. 실시간 값이므로 숫자를 고정 acceptance로 사용하지 않습니다.
+사용자 일반 브라우저에서는 같은 조건으로 약 33만 원대 왕복 결과가 관찰됐습니다. 실시간 값이므로 특정 숫자를 고정 acceptance로 사용하지 않습니다.
 
-## 4. 현재까지 핵심 실험 결과
+## 4. 핵심 실험 결과
 
-### Playwright-launched Edge
+### 첫 자동 검색 탭
 
-UI 첫 화면에서 직접 검색했지만 `Price unavailable`.
+Playwright-launched Edge와 native Edge + CDP attach 모두 첫 자동 검색 탭에서는 `Price unavailable`이 발생했습니다.
 
-### Native Edge + CDP attach
+### 수동 fresh window
 
-Windows `msedge.exe`를 native process로 실행하고 Playwright는 CDP attach만 해도 자동검색 결과 탭은 `Price unavailable`.
+자동화가 만든 search URL을 사용자가 새 창/새 탭에서 직접 열면 가격이 정상 표시됐습니다.
 
-`gl=kr`, `curr=KRW`, route/date는 정상이라 locale 누락은 직접 원인이 아닙니다.
+### 자동 fresh tab — 가격 렌더링 성공
 
-### 가장 중요한 사용자 관찰
-
-사용자가 자동화 브라우저에서 만들어진 **검색 결과 URL을 복사해서 새 창/새 탭에서 직접 열자 가격이 정상 표시**됐습니다.
-
-따라서 현재 판단:
+2026-09-04 사용자 Windows 실측:
 
 ```text
-URL/검색조건 생성 = 정상
-문제 = 첫 자동검색 탭 또는 자동화 context에서의 결과 로딩 상태
+fresh_tab_attempt=1
+navigator_webdriver=False
+footer_location=South Korea
+footer_currency=KRW
+price_candidates=2
+887,003 KRW
+1,270,502 KRW
 ```
+
+따라서 **동일 URL을 `context.new_page()`에서 fresh navigation하면 자동화된 Edge에서도 실제 KRW flight-row 가격이 렌더링될 수 있음이 확인됐습니다.**
+
+하지만 사용자가 첨부한 화면에는 `추천`과 `최저가 ₩338,121부터` 탭이 따로 있었고, 기존 probe는 `Cheapest` 영문 exact text만 찾아 한국어 `최저가` 탭을 클릭하지 못했습니다. 그 결과 추천 탭 가격을 읽고도 `PRICE_VISIBLE_AFTER_FRESH_TAB`을 출력했습니다.
+
+이전 출력은 **render gate 성공**으로만 인정하며, 실제 최저가 acceptance 성공으로 보지 않습니다.
 
 ## 5. 현재 코드
 
-`scripts/google_ui_probe.py`는 다음 순서입니다.
+`scripts/google_ui_probe.py`는 이제 다음 순서입니다.
 
 ```text
 native Edge + dedicated profile
 → 첫 탭에서 Google Flights UI 직접 검색
 → generated_search_url 출력
-→ 동일 context에 NEW TAB 생성
-→ generated_search_url을 그대로 goto
-→ Cheapest / More flights 필요 시 적용
-→ flight-row scoped KRW 가격 읽기
-→ 필요 시 여러 fresh tab 반복
+→ 동일 context NEW TAB
+→ generated_search_url fresh goto
+→ Cheapest / 최저가 영어·한국어 selector 탐색
+→ 탭 클릭 여부 기록
+→ 탭에 표시된 광고 최저가(예: ₩338,121부터) 추출
+→ More flights / 항공편 더보기 필요 시 적용
+→ row-scoped KRW 가격 수집
+→ advertised cheapest보다 row parser 최저가가 비싸면 acceptance 거부
 ```
 
-2026-09-04 검수에서 다음 hardening을 추가했습니다.
+추가 hardening:
 
-- body 전체 원화 숫자의 minimum fallback 제거
-- 실제 flight-row 형태의 DOM에서 나온 가격만 후보 인정
-- fresh tab 가격이 늦게 채워지는 경우를 위해 기본 15초 row-price wait
-- 실패 진단에 Footer Language/Location/Currency + navigator.webdriver/language/timezone + URL 포함
-- `generator-tab`, `fresh-tab-N`, `fresh-tab-N-error`, `final-error` artifact 유지
-- helper unit test 추가
+- body 전체 KRW minimum fallback 없음
+- price element에서 ancestor를 최대 12단계 올라가 flight-row shape를 찾음
+- visible KRW text도 flight-row ancestor가 확인된 경우에만 수집
+- 한국어 `최저가`, `항공편 더보기`, 결과 section marker 지원
+- 기본 15초 row-price wait
+- Footer Language/Location/Currency + navigator.webdriver/language/timezone + URL 진단
+- `generator-tab`, `fresh-tab-N`, error screenshot/txt/html artifact 유지
 
-runtime `src/flight_bot/providers.py`는 아직 기존 tfs URL Provider이며 **이번 hardening에서는 변경하지 않았습니다.**
+runtime `src/flight_bot/providers.py`는 아직 기존 tfs URL Provider입니다. **아직 runtime migration 하지 않았습니다.**
 
 ## 6. 사용자가 다음에 할 작업
 
@@ -93,82 +102,70 @@ flight-bot - test win
 
 `.venv-win`이 이미 있으면 01은 생략 가능합니다.
 
-성공 시:
+이번 성공 기준은 다음입니다.
 
 ```text
 generated_search_url=...
+
 === FRESH TAB ATTEMPT N ===
 fresh_url=...
+cheapest_tab_found=True
+cheapest_tab_text=최저가 ...
+cheapest_advertised=... KRW
+cheapest_tab_clicked=True
 price_candidates=...
-#1 xxx,xxx KRW | 항공사/시간/경유정보
+#1 ... KRW | 항공사/시간/경유정보
+render_gate=PRICE_VISIBLE_AFTER_FRESH_TAB
+cheapest_tab_ready=True
+cheapest_price_match=True
+cheapest_row_lowest=... KRW
+
 === SUMMARY ===
 fresh_tab_attempt=N
 ui_lowest=... KRW
-acceptance=PRICE_VISIBLE_AFTER_FRESH_TAB
+acceptance=CHEAPEST_PRICE_VISIBLE_AFTER_FRESH_TAB
 ```
 
-실패 시 다음 출력과 artifact를 전달합니다.
-
-```text
-fresh_tab_N_price_unavailable=...
-footer_location=...
-footer_currency=...
-navigator_webdriver=...
-navigator_language=...
-timezone=...
-url=...
-```
-
-```text
-artifacts/google-ui-win/generator-tab.{png,txt,html}
-artifacts/google-ui-win/fresh-tab-N.{png,txt,html}
-artifacts/google-ui-win/final-error.{png,txt,html}
-```
+`cheapest_advertised`가 약 33만 원인데 `cheapest_row_lowest`가 40만/80만 원대로 나오면 selector 또는 row parser가 아직 잘못된 것이므로 acceptance는 실패해야 합니다.
 
 ## 7. 결과 분기
 
-### A. `PRICE_VISIBLE_AFTER_FRESH_TAB`
+### A. `CHEAPEST_PRICE_VISIBLE_AFTER_FRESH_TAB`
 
-이 동작을 runtime Provider 설계에 반영합니다.
+이때 runtime Provider migration을 시작합니다.
 
-1. UI로 canonical search URL 생성 또는 안정적으로 재사용
-2. 가격 수집은 fresh tab에서 수행
-3. 실제 flight row 가격만 비교
-4. 표시 가격은 `observed`
-5. 최저 출국 후보 → 귀국 후보 → Booking 최종가격 검증
-6. Booking 단계에서 검증된 값만 `verified`
-7. `REQUIRE_VERIFIED_ALERTS=true` 유지
-8. fast-flights 제거
-9. Docker/Ubuntu 운영 가능성 검증
-10. tests/docs 갱신
+1. fresh-tab browser lifecycle 반영
+2. 실제 flight-row scoped observed price
+3. 최저 출국 후보 클릭
+4. returning flights 이동
+5. 귀국 후보 선택
+6. Booking / final total 검증
+7. observed / verified 분리
+8. `REQUIRE_VERIFIED_ALERTS=true` 유지
+9. fast-flights 제거
+10. Docker/Ubuntu 운영구조 검증
+11. tests/docs 갱신
 
-### B. 사용자가 수동 새 창에서는 가격이 보이지만 자동 `context.new_page()`에서는 계속 `Price unavailable`
+### B. `cheapest_tab_found=False`
 
-차이는 URL이 아니라 **Playwright/CDP가 붙어 있는 browser context**로 봅니다.
+`fresh-tab-N.html/txt` 기준으로 한국어/DOM selector를 보강합니다.
 
-다음 Primary 후보는 stealth/BotGuard 우회가 아니라 일반 사용자 브라우저 안에서 동작하는 extension/content-script sidecar입니다.
+### C. `cheapest_tab_clicked=True`인데 `cheapest_price_match=False`
 
-```text
-일반 Edge/Chrome profile
-→ extension이 Google Flights URL open
-→ 실제 DOM 가격 읽기
-→ localhost flight-bot API로 전달
-```
+탭 클릭 자체는 됐지만 row parser가 탭의 광고 최저가 row를 놓친 것입니다. price element의 ancestor 구조를 artifact HTML로 분석해 row-scoped parser만 보강합니다.
 
-### C. fresh tab에서 가격은 보이는데 parser가 0건
+### D. 다시 `Price unavailable`
 
-Provider 방향은 맞고 selector 문제입니다. `fresh-tab-N.html/txt` 기준으로 row-scoped selector만 수정합니다.
+동일 URL fresh navigation이 일시적으로 실패한 것입니다. 여러 fresh tab 결과와 세션 진단을 비교합니다. 일반 브라우저만 계속 성공하고 자동 context가 지속 실패할 때만 extension/content-script sidecar를 다시 검토합니다.
 
 ## 8. CI
 
-이전 기준 HEAD `8621a40`의 GitHub Actions run `33838752221`은 Linux/Windows unit job 모두 `success`였습니다.
-
-실제 live Google Flights acceptance는 GitHub hosted runner가 아니라 사용자 Windows에서 수행합니다. 기존 Ubuntu/headless manual UI job은 Windows-visible probe와 모순되어 제거했습니다.
+실제 live Google Flights acceptance는 사용자 Windows에서 수행합니다. GitHub 일반 CI는 Linux/Windows Python 3.12 compile/test와 Windows Playwright Chromium launch를 검증합니다.
 
 ## 9. 이미 확인한 실패 경로 — 반복 금지
 
 - SerpApi: 브라우저 대비 비싼 결과 / 저렴한 혼합·별도티켓 누락 사례
-- tfs 직링크 + Playwright: hosted + Windows 모두 `Price unavailable`
+- tfs 직링크 + Playwright: 첫 자동 탭에서 hosted + Windows `Price unavailable`
 - fast-flights 3.1: parser `IndexError`, 일부 가격 대신 token
 - Fli direct API commit `121d34f...`: CJJ↔TPE no-results; upstream no-results/BotGuard limitations
 
