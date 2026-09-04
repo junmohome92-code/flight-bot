@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from playwright.async_api import BrowserContext, Locator, Page, async_playwright
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 
 ORIGIN = "CJJ"
@@ -40,6 +39,10 @@ def parse_price(text: str | None) -> int | None:
     if not match:
         return None
     return int(match.group(1).replace(",", ""))
+
+
+def step(number: int, total: int, message: str) -> None:
+    print(f"[{number}/{total}] {message}", flush=True)
 
 
 async def first_visible(locator: Locator) -> Locator | None:
@@ -86,7 +89,6 @@ async def enter_origin(page: Page) -> None:
 
     popup = await last_visible(page.locator("input[aria-label*='Where else?']"))
     if popup is None:
-        # Google occasionally keeps the original field editable instead of opening a second input.
         popup = field
     await popup.fill(ORIGIN)
     await page.wait_for_timeout(650)
@@ -132,7 +134,6 @@ async def enter_dates(page: Page) -> None:
     await page.wait_for_timeout(350)
     await return_popup.press("Enter")
     await page.wait_for_timeout(350)
-    # Some layouts use the first Enter to select the date and the second to close the date picker.
     try:
         await return_popup.press("Enter")
     except Exception:
@@ -207,7 +208,6 @@ async def collect_price_candidates(page: Page) -> list[PriceCandidate]:
             pass
         found.append(PriceCandidate(price, label or "aria-label", row_text.strip()[:2200]))
 
-    # Fallback for UI variants where price spans have text but no aria-label.
     if not found:
         body = await page.locator("body").inner_text()
         for raw in _KRW_RE.findall(body):
@@ -244,8 +244,6 @@ async def launch_context(playwright, profile_dir: Path, headless: bool) -> tuple
     if requested:
         candidates: list[str | None] = [requested]
     elif sys.platform.startswith("win") and not headless:
-        # Prefer the user's installed browser engine on Windows. The profile is dedicated to this bot,
-        # so the real personal Edge/Chrome profile is never touched.
         candidates = ["msedge", "chrome", None]
     else:
         candidates = [None, "msedge", "chrome"]
@@ -277,6 +275,7 @@ async def main() -> None:
     artifact_dir = Path(os.getenv("BROWSER_DEBUG_DIR", "artifacts/google-ui-win"))
     profile_dir = Path(os.getenv("BROWSER_PROFILE_DIR", "artifacts/google-profile-win"))
     keep_open_seconds = int(os.getenv("BROWSER_KEEP_OPEN_SECONDS", "8" if not headless else "0"))
+    total_steps = 9
 
     print("Google Flights real UI probe")
     print("  CJJ -> TPE")
@@ -291,26 +290,41 @@ async def main() -> None:
     page: Page | None = None
     try:
         profile_dir.mkdir(parents=True, exist_ok=True)
+        step(1, total_steps, "Launching persistent browser")
         context, channel = await launch_context(playwright, profile_dir, headless)
         page = context.pages[0] if context.pages else await context.new_page()
         page.set_default_timeout(timeout_ms)
         print(f"  browser: {channel}")
         print(f"  profile: {profile_dir.resolve()}")
 
+        step(2, total_steps, "Opening Google Flights")
         await page.goto(
             "https://www.google.com/travel/flights?hl=en&curr=KRW&gl=kr",
             wait_until="domcontentloaded",
             timeout=timeout_ms,
         )
         await dismiss_consent(page)
+
+        step(3, total_steps, "Entering origin CJJ")
         await enter_origin(page)
+
+        step(4, total_steps, "Entering destination TPE")
         await enter_destination(page)
+
+        step(5, total_steps, "Entering dates 2026-09-18 .. 2026-09-20")
         await enter_dates(page)
+
+        step(6, total_steps, "Pressing Search")
         await press_search(page)
+
+        step(7, total_steps, "Waiting for flight results")
         await wait_for_results(page, timeout_ms)
+
+        step(8, total_steps, "Selecting Cheapest and expanding results")
         await select_cheapest(page)
         await expand_results(page)
 
+        step(9, total_steps, "Reading KRW prices from flight results")
         await save_debug(page, artifact_dir, "cjj-tpe-results")
         body = await page.locator("body").inner_text()
         prices = await collect_price_candidates(page)
