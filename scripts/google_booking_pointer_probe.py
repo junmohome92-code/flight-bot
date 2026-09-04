@@ -135,7 +135,12 @@ _CAPTURE_JS = r"""
             const text = `${control.innerText || control.textContent || ''}\n${control.getAttribute('aria-label') || ''}`.trim();
             if (!text || text.length > 900 || !cheapestRe.test(text)) continue;
             const values = parsePrices(text);
-            if (values.length) state.advertisedPrice = Math.min(...values);
+            if (values.length) {
+                const next = Math.min(...values);
+                state.advertisedPrice = state.advertisedPrice === null
+                    ? next
+                    : Math.min(state.advertisedPrice, next);
+            }
         }
     }
 
@@ -430,37 +435,39 @@ async def wait_for_candidate(
         latest = await capture_state(page)
         candidates = phase_candidates(latest, phase)
         if candidates:
-            first_seen_at = min(float(item.get("seenAtMs") or 0.0) for item in candidates) if first_seen_at is None else first_seen_at
+            observed_first = min(float(item.get("seenAtMs") or 0.0) for item in candidates)
+            first_seen_at = observed_first if first_seen_at is None else min(first_seen_at, observed_first)
         advertised_raw = latest.get("advertisedPrice") if phase == "departure" else None
         try:
             advertised = int(advertised_raw) if advertised_raw is not None else None
         except (TypeError, ValueError):
             advertised = None
 
-        if advertised is not None:
-            chosen = choose_lowest_candidate(
-                candidates,
-                origin=origin,
-                destination=destination,
-                advertised_price=advertised,
-                allow_missing_route=allow_missing_route,
-            )
-            if chosen is not None:
-                return dict(chosen), latest, "advertised-match"
-            # Fail closed: if Google advertises a cheaper row than all captured
-            # candidates, keep waiting instead of choosing a stable expensive row.
-        elif first_seen_at is not None:
+        if first_seen_at is not None:
             now_ms = float(latest.get("nowMs") or first_seen_at)
             if now_ms - first_seen_at >= fallback_capture_ms:
-                chosen = choose_lowest_candidate(
-                    candidates,
-                    origin=origin,
-                    destination=destination,
-                    advertised_price=None,
-                    allow_missing_route=allow_missing_route,
-                )
-                if chosen is not None:
-                    return dict(chosen), latest, "captured-lowest"
+                if advertised is not None:
+                    chosen = choose_lowest_candidate(
+                        candidates,
+                        origin=origin,
+                        destination=destination,
+                        advertised_price=advertised,
+                        allow_missing_route=allow_missing_route,
+                    )
+                    if chosen is not None:
+                        return dict(chosen), latest, "advertised-guarded-lowest"
+                    # Fail closed. A cheaper tab hint exists but its matching
+                    # flight row has not been captured yet, so keep waiting.
+                else:
+                    chosen = choose_lowest_candidate(
+                        candidates,
+                        origin=origin,
+                        destination=destination,
+                        advertised_price=None,
+                        allow_missing_route=allow_missing_route,
+                    )
+                    if chosen is not None:
+                        return dict(chosen), latest, "captured-lowest"
         await page.wait_for_timeout(10)
     return {}, latest, "timeout"
 
@@ -616,6 +623,7 @@ async def main() -> None:
     print("  CJJ -> TPE -> CJJ")
     print("  capture snapshots survive disappearing price spans: YES")
     print("  advertised Cheapest guard: YES")
+    print("  capture window completes before selection: YES")
     print("  stable expensive fallback while cheaper advertised: NO")
     print("  returning route token may be omitted after Returning flights confirmation: YES")
     print("  DOM element.click fallback: NO")
