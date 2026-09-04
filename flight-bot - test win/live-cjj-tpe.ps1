@@ -16,13 +16,15 @@ $env:BROWSER_TIMEOUT_MS = '60000'
 $env:BROWSER_DEBUG_DIR = (Join-Path $RepoRoot 'artifacts\google-ui-win')
 $env:BROWSER_PROFILE_DIR = (Join-Path $RepoRoot 'artifacts\google-profile-win')
 $env:BROWSER_KEEP_OPEN_SECONDS = if ($Headless) { '0' } else { '8' }
+$env:GOOGLE_UI_MAX_ATTEMPTS = '3'
+$env:GOOGLE_UI_PRICE_WAIT_MS = '15000'
 
 # Do not use the personal Edge/Chrome profile. The probe uses its own persistent
 # profile so Google sees a normal browser session over repeated checks without
 # risking the user's real browser data.
 Remove-Item Env:BROWSER_CHANNEL -ErrorAction SilentlyContinue
 
-Write-Host 'Google Flights real UI probe'
+Write-Host 'Google Flights real UI fresh-tab probe'
 Write-Host '  CJJ -> TPE'
 Write-Host '  2026-09-18 ~ 2026-09-20'
 Write-Host '  1 adult / Economy / KRW'
@@ -30,6 +32,10 @@ Write-Host '  direct tfs URL: NO'
 Write-Host '  fast-flights parser: NO'
 Write-Host '  Fli direct API: NO'
 Write-Host '  persistent browser profile: YES'
+Write-Host '  generated URL -> fresh NEW tab: YES'
+Write-Host '  body-wide price fallback: NO'
+Write-Host "  fresh tab attempts: $($env:GOOGLE_UI_MAX_ATTEMPTS)"
+Write-Host "  row price wait: $($env:GOOGLE_UI_PRICE_WAIT_MS) ms"
 Write-Host "  headless: $($env:BROWSER_HEADLESS)"
 Write-Host ''
 
