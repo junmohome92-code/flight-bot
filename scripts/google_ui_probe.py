@@ -17,8 +17,6 @@ ORIGIN = "CJJ"
 DESTINATION = "TPE"
 DEPARTURE = "09/18/2026"
 RETURN = "09/20/2026"
-# Keep the UI in English for stable selectors. Region and displayed currency are
-# independently forced with gl=kr and curr=KRW, then verified from the page footer.
 GOOGLE_FLIGHTS_URL = "https://www.google.com/travel/flights?hl=en&gl=kr&curr=KRW"
 _KRW_RE = re.compile(r"₩\s*([0-9][0-9,]*)")
 _WON_RE = re.compile(r"([0-9][0-9,]*)\s+(?:South Korean won|Korean won|KRW)", re.I)
@@ -42,13 +40,7 @@ def parse_price(text: str | None) -> int | None:
     if not text:
         return None
     match = _KRW_RE.search(text) or _WON_RE.search(text)
-    if not match:
-        return None
-    return int(match.group(1).replace(",", ""))
-
-
-def step(message: str) -> None:
-    print(message, flush=True)
+    return int(match.group(1).replace(",", "")) if match else None
 
 
 def free_local_port() -> int:
@@ -63,17 +55,13 @@ def find_windows_edge() -> Path | None:
         Path(os.environ.get("PROGRAMFILES", "")) / "Microsoft/Edge/Application/msedge.exe",
         Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft/Edge/Application/msedge.exe",
     ]
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    return None
+    return next((path for path in candidates if path.is_file()), None)
 
 
 def launch_native_edge(profile_dir: Path, port: int) -> subprocess.Popen:
     edge = find_windows_edge()
     if edge is None:
         raise RuntimeError("Microsoft Edge executable was not found")
-
     args = [
         str(edge),
         f"--remote-debugging-port={port}",
@@ -112,7 +100,7 @@ async def first_visible(locator: Locator) -> Locator | None:
             if await item.is_visible():
                 return item
         except Exception:
-            continue
+            pass
     return None
 
 
@@ -124,7 +112,7 @@ async def last_visible(locator: Locator) -> Locator | None:
             if await item.is_visible():
                 visible.append(item)
         except Exception:
-            continue
+            pass
     return visible[-1] if visible else None
 
 
@@ -143,7 +131,7 @@ async def dismiss_consent(page: Page) -> None:
 async def enter_origin(page: Page) -> None:
     field = await first_visible(page.locator("input[aria-label='Where from?']"))
     if field is None:
-        raise RuntimeError("Google Flights origin input 'Where from?' was not found")
+        raise RuntimeError("Google Flights origin input was not found")
     await field.click()
     await page.wait_for_timeout(350)
     popup = await last_visible(page.locator("input[aria-label*='Where else?']")) or field
@@ -157,7 +145,7 @@ async def enter_origin(page: Page) -> None:
 async def enter_destination(page: Page) -> None:
     field = await first_visible(page.locator("input[aria-label^='Where to?']"))
     if field is None:
-        raise RuntimeError("Google Flights destination input 'Where to?' was not found")
+        raise RuntimeError("Google Flights destination input was not found")
     await field.click()
     await page.wait_for_timeout(350)
     popup = await last_visible(page.locator("input[aria-label^='Where to?']")) or field
@@ -208,8 +196,7 @@ async def wait_for_results(page: Page, timeout_ms: int) -> None:
         if "price unavailable" in body and ("cjj" in body or "cheongju" in body):
             return
         await page.wait_for_timeout(500)
-    body = (await page.locator("body").inner_text())[:2500]
-    raise RuntimeError(f"Google Flights results did not become visible. Body sample:\n{body}")
+    raise RuntimeError("Google Flights results did not become visible before timeout")
 
 
 async def select_cheapest(page: Page) -> None:
@@ -217,7 +204,7 @@ async def select_cheapest(page: Page) -> None:
         cheapest = page.get_by_text("Cheapest", exact=True).first
         if await cheapest.count() and await cheapest.is_visible():
             await cheapest.click(timeout=4000)
-            await page.wait_for_timeout(1400)
+            await page.wait_for_timeout(1200)
     except Exception:
         pass
 
@@ -228,10 +215,10 @@ async def expand_results(page: Page) -> None:
             item = page.get_by_text(label, exact=False).last
             if await item.count() and await item.is_visible():
                 await item.click(timeout=3500)
-                await page.wait_for_timeout(1000)
+                await page.wait_for_timeout(900)
                 return
         except Exception:
-            continue
+            pass
 
 
 async def collect_price_candidates(page: Page) -> list[PriceCandidate]:
@@ -289,209 +276,153 @@ async def save_debug(page: Page, artifact_dir: Path, stem: str) -> None:
         pass
 
 
-def _clean_setting_line(value: str) -> str:
-    return value.replace("\u200b", "").replace("\u2060", "").strip()
-
-
-def footer_setting(body: str, label: str) -> str | None:
-    lines = [_clean_setting_line(line) for line in body.splitlines() if _clean_setting_line(line)]
-    wanted = label.lower()
-    for index, line in enumerate(lines):
-        lower = line.lower()
-        if lower == wanted and index + 1 < len(lines):
-            return lines[index + 1]
-        if lower.startswith(wanted) and len(line) > len(label):
-            value = line[len(label):].strip(" :\t")
-            if value:
-                return value
-    return None
-
-
-async def locale_diagnostics(page: Page) -> dict[str, str | bool | None]:
-    body = await page.locator("body").inner_text()
+async def print_session_diagnostics(page: Page, label: str) -> None:
     runtime = await page.evaluate(
         """() => ({
             webdriver: navigator.webdriver,
             language: navigator.language,
-            languages: navigator.languages,
-            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-            userAgent: navigator.userAgent
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
         })"""
     )
-    diagnostics: dict[str, str | bool | None] = {
-        "url_gl_kr": "gl=kr" in page.url.lower(),
-        "url_curr_krw": "curr=krw" in page.url.lower(),
-        "footer_language": footer_setting(body, "Language"),
-        "footer_location": footer_setting(body, "Location"),
-        "footer_currency": footer_setting(body, "Currency"),
-        "navigator_webdriver": runtime.get("webdriver"),
-        "navigator_language": runtime.get("language"),
-        "timezone": runtime.get("timezone"),
-    }
-
-    print("\n=== LOCALE / SESSION DIAGNOSTICS ===")
-    for key, value in diagnostics.items():
-        print(f"{key}={value}")
-    return diagnostics
+    print(f"\n=== {label} SESSION ===")
+    print(f"url={page.url}")
+    print(f"navigator_webdriver={runtime.get('webdriver')}")
+    print(f"navigator_language={runtime.get('language')}")
+    print(f"timezone={runtime.get('timezone')}")
 
 
-async def run_search_attempt(
-    page: Page,
-    *,
-    attempt: int,
-    max_attempts: int,
-    timeout_ms: int,
-    artifact_dir: Path,
-) -> tuple[list[PriceCandidate], str]:
-    print(f"\n=== SEARCH ATTEMPT {attempt}/{max_attempts} ===")
-    step("[A] Opening Google Flights landing page")
+async def generate_search_url(page: Page, timeout_ms: int) -> str:
+    print("[1/7] Opening Google Flights landing page", flush=True)
     await page.goto(GOOGLE_FLIGHTS_URL, wait_until="domcontentloaded", timeout=timeout_ms)
     await dismiss_consent(page)
 
-    step("[B] Entering CJJ -> TPE")
+    print("[2/7] Entering CJJ -> TPE", flush=True)
     await enter_origin(page)
     await enter_destination(page)
 
-    step("[C] Entering 2026-09-18 .. 2026-09-20")
+    print("[3/7] Entering dates", flush=True)
     await enter_dates(page)
 
-    step("[D] Pressing Search")
+    print("[4/7] Pressing Search", flush=True)
     await press_search(page)
 
-    step("[E] Waiting for results")
+    print("[5/7] Waiting for first result page", flush=True)
     await wait_for_results(page, timeout_ms)
+    await save_debug(page, Path(os.getenv("BROWSER_DEBUG_DIR", "artifacts/google-ui-win")), "generator-tab")
+    await print_session_diagnostics(page, "GENERATOR TAB")
+    search_url = page.url
+    if "/travel/flights/search" not in search_url:
+        raise RuntimeError(f"Google Flights did not produce a search URL: {search_url}")
+    print(f"generated_search_url={search_url}")
+    return search_url
 
-    step("[F] Selecting Cheapest / expanding")
+
+async def inspect_fresh_tab(
+    context,
+    search_url: str,
+    *,
+    attempt: int,
+    timeout_ms: int,
+    artifact_dir: Path,
+) -> tuple[Page, list[PriceCandidate], str]:
+    print(f"\n=== FRESH TAB ATTEMPT {attempt} ===", flush=True)
+    page = await context.new_page()
+    page.set_default_timeout(timeout_ms)
+    print("[6/7] Opening generated search URL in a NEW tab", flush=True)
+    await page.goto(search_url, wait_until="domcontentloaded", timeout=timeout_ms)
+    await wait_for_results(page, timeout_ms)
     await select_cheapest(page)
     await expand_results(page)
-
-    step("[G] Reading KRW flight-row prices")
+    print("[7/7] Reading prices from fresh tab", flush=True)
     body = await page.locator("body").inner_text()
     prices = await collect_price_candidates(page)
-    await save_debug(page, artifact_dir, f"attempt-{attempt}-results")
-    await locale_diagnostics(page)
-
-    print(f"results_url={page.url}")
+    await save_debug(page, artifact_dir, f"fresh-tab-{attempt}")
+    await print_session_diagnostics(page, f"FRESH TAB {attempt}")
     print(f"price_candidates={len(prices)}")
     for index, candidate in enumerate(prices[:12], start=1):
         context_text = " | ".join(
             line.strip() for line in candidate.row_text.splitlines() if line.strip()
         )[:700]
         print(f"#{index} {candidate.price:,} KRW | {context_text or candidate.source}")
-
-    return prices, body
+    return page, prices, body
 
 
 async def main() -> None:
     if not sys.platform.startswith("win"):
         raise SystemExit("This probe is currently designed for Windows Edge acceptance testing")
-
-    headless = env_bool("BROWSER_HEADLESS", False)
-    if headless:
-        raise SystemExit("Native Edge CDP acceptance must run visible; BROWSER_HEADLESS=false")
+    if env_bool("BROWSER_HEADLESS", False):
+        raise SystemExit("This acceptance probe must run visible; BROWSER_HEADLESS=false")
 
     timeout_ms = int(os.getenv("BROWSER_TIMEOUT_MS", "60000"))
     artifact_dir = Path(os.getenv("BROWSER_DEBUG_DIR", "artifacts/google-ui-win"))
     profile_dir = Path(os.getenv("BROWSER_PROFILE_DIR", "artifacts/google-profile-win"))
+    max_fresh_tabs = max(1, min(int(os.getenv("GOOGLE_UI_MAX_ATTEMPTS", "3")), 5))
     keep_open_seconds = int(os.getenv("BROWSER_KEEP_OPEN_SECONDS", "12"))
-    max_attempts = max(1, min(int(os.getenv("GOOGLE_UI_MAX_ATTEMPTS", "5")), 5))
 
-    print("Google Flights native Edge UI probe")
-    print("  CJJ -> TPE")
-    print("  2026-09-18 ~ 2026-09-20")
-    print("  1 adult / Economy / KRW")
-    print("  Edge launch: native msedge.exe")
-    print("  Playwright role: CDP attach only")
-    print("  UI language: English (stable selectors)")
-    print("  region: gl=kr")
-    print("  currency: curr=KRW")
-    print("  browser language hint: ko-KR")
-    print("  session: dedicated persistent browser profile")
-    print(f"  max fresh UI attempts: {max_attempts}")
+    print("Google Flights native Edge fresh-tab probe")
+    print("  CJJ -> TPE / 2026-09-18 ~ 2026-09-20")
+    print("  first tab: generate canonical Google Flights URL")
+    print("  next tabs: reopen EXACT same URL and read prices")
+    print("  based on user-confirmed manual copy/open behavior")
+    print(f"  fresh tabs: {max_fresh_tabs}")
 
     profile_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
     port = free_local_port()
     edge_process: subprocess.Popen | None = None
     playwright = await async_playwright().start()
     browser: Browser | None = None
-    page: Page | None = None
+    last_page: Page | None = None
 
     try:
-        step("[1/2] Launching native Microsoft Edge")
         edge_process = launch_native_edge(profile_dir, port)
         await wait_for_cdp(port)
-
-        step("[2/2] Attaching Playwright over CDP")
         browser = await playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
         if not browser.contexts:
             raise RuntimeError("Native Edge exposed no browser context")
         context = browser.contexts[0]
-        await context.set_extra_http_headers(
-            {"Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"}
-        )
-        pages = context.pages
-        page = pages[0] if pages else await context.new_page()
-        page.set_default_timeout(timeout_ms)
+        generator = context.pages[0] if context.pages else await context.new_page()
+        generator.set_default_timeout(timeout_ms)
 
-        final_body = ""
-        final_prices: list[PriceCandidate] = []
-        for attempt in range(1, max_attempts + 1):
-            if attempt > 1:
-                wait_ms = 2000 + (attempt - 2) * 500
-                print(f"Retrying after {wait_ms / 1000:.1f}s ...", flush=True)
-                await page.wait_for_timeout(wait_ms)
+        search_url = await generate_search_url(generator, timeout_ms)
 
-            prices, body = await run_search_attempt(
-                page,
+        for attempt in range(1, max_fresh_tabs + 1):
+            page, prices, body = await inspect_fresh_tab(
+                context,
+                search_url,
                 attempt=attempt,
-                max_attempts=max_attempts,
                 timeout_ms=timeout_ms,
                 artifact_dir=artifact_dir,
             )
-            final_prices = prices
-            final_body = body
-
+            last_page = page
             if prices:
-                print(f"\nPrice became visible on attempt {attempt}/{max_attempts}.")
-                break
+                print("\n=== SUMMARY ===")
+                print(f"fresh_tab_attempt={attempt}")
+                print(f"ui_lowest={prices[0].price:,} KRW")
+                print("acceptance=PRICE_VISIBLE_AFTER_FRESH_TAB")
+                print(f"artifact_dir={artifact_dir.resolve()}")
+                if keep_open_seconds > 0:
+                    print(f"Browser stays open for {keep_open_seconds}s for visual confirmation ...")
+                    await page.wait_for_timeout(keep_open_seconds * 1000)
+                return
 
-            if "price unavailable" not in body.lower():
-                raise RuntimeError(
-                    "Google UI completed search but no KRW flight-row price was detected"
-                )
+            unavailable = "price unavailable" in body.lower()
+            print(f"fresh_tab_{attempt}_price_unavailable={unavailable}")
+            if attempt < max_fresh_tabs:
+                await page.close()
+                await asyncio.sleep(1.0)
 
-            print(f"attempt {attempt}: Google UI returned Price unavailable")
-
-        if not final_prices:
-            await save_debug(page, artifact_dir, "cjj-tpe-error")
-            raise RuntimeError(
-                f"Native Edge UI returned Price unavailable on all {max_attempts} fresh searches"
-            )
-
-        print("\n=== SUMMARY ===")
-        print(f"ui_lowest={final_prices[0].price:,} KRW")
-        print(f"artifact_dir={artifact_dir.resolve()}")
-        print("acceptance=PRICE_VISIBLE")
-
-        if keep_open_seconds > 0:
-            print(f"\nBrowser stays open for {keep_open_seconds}s for visual confirmation ...")
-            await page.wait_for_timeout(keep_open_seconds * 1000)
+        raise RuntimeError(
+            "Generated URL was correct, but all automated fresh tabs still showed no usable KRW price"
+        )
     except Exception as exc:
-        if page is not None:
-            await save_debug(page, artifact_dir, "cjj-tpe-error")
-            try:
-                await locale_diagnostics(page)
-            except Exception:
-                pass
-            print(f"\nerror_url={page.url}")
+        if last_page is not None:
+            await save_debug(last_page, artifact_dir, "final-error")
         print(f"\nPROBE FAILED: {type(exc).__name__}: {exc}")
         print(f"artifacts={artifact_dir.resolve()}")
-        if page is not None and keep_open_seconds > 0:
-            print(
-                f"Browser stays open for {keep_open_seconds}s so the failure page can be inspected ..."
-            )
+        if last_page is not None and keep_open_seconds > 0:
             try:
-                await page.wait_for_timeout(keep_open_seconds * 1000)
+                await last_page.wait_for_timeout(keep_open_seconds * 1000)
             except Exception:
                 pass
         raise SystemExit(2) from exc
