@@ -12,10 +12,11 @@ from flight_bot.service import FlightService
 class FakeProvider:
     name = "fake"
 
-    def __init__(self, prices, *, delay: float = 0.0):
+    def __init__(self, prices, *, delay: float = 0.0, verified: bool = True):
         self.prices = list(prices)
         self.calls = []
         self.delay = delay
+        self.verified = verified
 
     async def search(self, slot, *, verify_below_price=None):
         self.calls.append(verify_below_price)
@@ -29,7 +30,7 @@ class FakeProvider:
             depart_date=slot.depart_date,
             return_date=slot.return_date,
             total_price=price,
-            price_verified=True,
+            price_verified=self.verified,
             raw={"observed_price": price},
             fetched_at=datetime.now(timezone.utc),
         )
@@ -73,6 +74,22 @@ async def test_target_alert_latches_and_rearms(tmp_path):
 
     assert len(notifier.messages) == 2
     assert provider.calls == [350000, None, None, 350000]
+
+
+@pytest.mark.asyncio
+async def test_unverified_below_target_never_alerts_or_latches_when_required(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    slot = make_slot(db)
+    provider = FakeProvider([330000], verified=False)
+    service = FlightService(Settings(require_verified_alerts=True), db, provider=provider)
+    notifier = FakeNotifier()
+    service.set_notifier(notifier)
+
+    await service.check_slot(slot.id, notify_target=True)
+
+    assert notifier.messages == []
+    assert db.get_slot(slot.id).alert_state == "ARMED"
+    assert db.get_slot(slot.id).last_observed_price == 330000
 
 
 @pytest.mark.asyncio
