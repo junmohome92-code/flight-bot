@@ -19,10 +19,15 @@ DEPARTURE = "09/18/2026"
 RETURN = "09/20/2026"
 GOOGLE_FLIGHTS_URL = "https://www.google.com/travel/flights?hl=en&gl=kr&curr=KRW"
 _KRW_RE = re.compile(r"₩\s*([0-9][0-9,]*)")
+_KRW_TEXT_RE = re.compile(r"₩\s*[0-9][0-9,]*")
 _WON_RE = re.compile(r"([0-9][0-9,]*)\s+(?:South Korean won|Korean won|KRW)", re.I)
 _TIME_RE = re.compile(r"\b\d{1,2}:\d{2}(?:\s?[AP]M)?\b", re.I)
-_STOP_RE = re.compile(r"\b(?:nonstop|\d+\s+stops?)\b", re.I)
-_DURATION_RE = re.compile(r"\b\d+\s*hr(?:\s*\d+\s*min)?\b", re.I)
+_STOP_RE = re.compile(r"(?:\bnonstop\b|\b\d+\s+stops?\b|직항|경유\s*\d*회?)", re.I)
+_DURATION_RE = re.compile(
+    r"(?:\b\d+\s*hr(?:\s*\d+\s*min)?\b|\d+\s*시간(?:\s*\d+\s*분)?)",
+    re.I,
+)
+_CHEAPEST_TAB_RE = re.compile(r"^\s*(?:Cheapest\b|최저가)", re.I)
 
 
 @dataclass(frozen=True)
@@ -30,6 +35,14 @@ class PriceCandidate:
     price: int
     source: str
     row_text: str
+
+
+@dataclass(frozen=True)
+class CheapestTabState:
+    found: bool
+    clicked: bool
+    text: str
+    advertised_price: int | None
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -50,6 +63,16 @@ def parse_prices(text: str | None) -> list[int]:
 def parse_price(text: str | None) -> int | None:
     values = parse_prices(text)
     return values[0] if values else None
+
+
+def looks_like_cheapest_tab(text: str | None) -> bool:
+    return bool(text and _CHEAPEST_TAB_RE.search(text))
+
+
+def cheapest_price_consistent(advertised_price: int | None, row_lowest: int | None) -> bool:
+    if row_lowest is None:
+        return False
+    return advertised_price is None or row_lowest <= advertised_price
 
 
 def row_looks_like_flight_result(text: str | None) -> bool:
@@ -137,7 +160,7 @@ async def last_visible(locator: Locator) -> Locator | None:
 
 
 async def dismiss_consent(page: Page) -> None:
-    for label in ("Accept all", "Reject all", "I agree"):
+    for label in ("Accept all", "Reject all", "I agree", "모두 동의", "모두 거부"):
         try:
             button = page.get_by_role("button", name=label, exact=False).first
             if await button.count() and await button.is_visible():
@@ -150,6 +173,8 @@ async def dismiss_consent(page: Page) -> None:
 
 async def enter_origin(page: Page) -> None:
     field = await first_visible(page.locator("input[aria-label='Where from?']"))
+    if field is None:
+        field = await first_visible(page.locator("input[aria-label*='출발']"))
     if field is None:
         raise RuntimeError("Google Flights origin input was not found")
     await field.click()
@@ -165,6 +190,8 @@ async def enter_origin(page: Page) -> None:
 async def enter_destination(page: Page) -> None:
     field = await first_visible(page.locator("input[aria-label^='Where to?']"))
     if field is None:
+        field = await first_visible(page.locator("input[aria-label*='도착']"))
+    if field is None:
         raise RuntimeError("Google Flights destination input was not found")
     await field.click()
     await page.wait_for_timeout(350)
@@ -179,6 +206,8 @@ async def enter_destination(page: Page) -> None:
 async def enter_dates(page: Page) -> None:
     departure = await first_visible(page.locator("input[aria-label='Departure']"))
     if departure is None:
+        departure = await first_visible(page.locator("input[aria-label*='출발']"))
+    if departure is None:
         raise RuntimeError("Google Flights Departure input was not found")
     await departure.click()
     await page.wait_for_timeout(450)
@@ -187,6 +216,8 @@ async def enter_dates(page: Page) -> None:
     await page.wait_for_timeout(350)
 
     return_popup = await last_visible(page.locator("input[aria-label='Return']"))
+    if return_popup is None:
+        return_popup = await last_visible(page.locator("input[aria-label*='귀국']"))
     if return_popup is None:
         raise RuntimeError("Google Flights Return input was not found")
     await return_popup.fill(RETURN)
@@ -203,6 +234,8 @@ async def enter_dates(page: Page) -> None:
 async def press_search(page: Page) -> None:
     button = await first_visible(page.locator("button[aria-label='Search']"))
     if button is None:
+        button = await first_visible(page.locator("button[aria-label*='검색']"))
+    if button is None:
         raise RuntimeError("Google Flights Search button was not found")
     await button.click()
 
@@ -211,32 +244,103 @@ async def wait_for_results(page: Page, timeout_ms: int) -> None:
     deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
     while asyncio.get_running_loop().time() < deadline:
         body = (await page.locator("body").inner_text()).lower()
-        if "departing flights" in body or "best departing flights" in body:
+        if (
+            "departing flights" in body
+            or "best departing flights" in body
+            or "출발 항공편" in body
+            or "인기 출발 항공편" in body
+        ):
             return
-        if "price unavailable" in body and ("cjj" in body or "cheongju" in body):
+        if (
+            ("price unavailable" in body or "가격 정보를 이용할 수" in body)
+            and ("cjj" in body or "cheongju" in body or "청주" in body)
+        ):
             return
         await page.wait_for_timeout(500)
     body = (await page.locator("body").inner_text())[:2500]
     raise RuntimeError(f"Google Flights results did not become visible. Body sample:\n{body}")
 
 
-async def select_cheapest(page: Page) -> None:
+async def _control_text(control: Locator) -> str:
+    values: list[str] = []
     try:
-        cheapest = page.get_by_text("Cheapest", exact=True).first
-        if await cheapest.count() and await cheapest.is_visible():
-            await cheapest.click(timeout=4000)
-            await page.wait_for_timeout(1200)
+        value = (await control.inner_text()).strip()
+        if value:
+            values.append(value)
+    except Exception:
+        pass
+    try:
+        value = (await control.get_attribute("aria-label") or "").strip()
+        if value and value not in values:
+            values.append(value)
+    except Exception:
+        pass
+    return " | ".join(values)
+
+
+async def select_cheapest(page: Page) -> CheapestTabState:
+    control: Locator | None = None
+    for locator in (
+        page.get_by_role("tab", name=_CHEAPEST_TAB_RE),
+        page.get_by_role("button", name=_CHEAPEST_TAB_RE),
+        page.get_by_text(_CHEAPEST_TAB_RE),
+    ):
+        control = await first_visible(locator)
+        if control is not None:
+            break
+
+    if control is None:
+        print("cheapest_tab_found=False")
+        return CheapestTabState(False, False, "", None)
+
+    text_before = await _control_text(control)
+    advertised_price = parse_price(text_before)
+    print("cheapest_tab_found=True")
+    print(f"cheapest_tab_text={text_before or '<empty>'}")
+    if advertised_price is not None:
+        print(f"cheapest_advertised={advertised_price:,} KRW")
+    else:
+        print("cheapest_advertised=unknown")
+
+    try:
+        await control.click(timeout=5000)
+        await page.wait_for_timeout(1800)
+    except Exception as exc:
+        print(f"cheapest_tab_clicked=False ({type(exc).__name__}: {exc})")
+        return CheapestTabState(True, False, text_before, advertised_price)
+
+    text_after = await _control_text(control)
+    if text_after:
+        advertised_price = parse_price(text_after) or advertised_price
+    print("cheapest_tab_clicked=True")
+
+    try:
+        state = await control.evaluate(
+            """el => {
+                const host = el.closest('[role="tab"], button, [role="button"]') || el;
+                return {
+                    ariaSelected: host.getAttribute('aria-selected'),
+                    ariaPressed: host.getAttribute('aria-pressed'),
+                    text: (host.innerText || host.textContent || '').trim()
+                };
+            }"""
+        )
+        print(f"cheapest_tab_aria_selected={state.get('ariaSelected')}")
+        print(f"cheapest_tab_aria_pressed={state.get('ariaPressed')}")
     except Exception:
         pass
 
+    return CheapestTabState(True, True, text_after or text_before, advertised_price)
+
 
 async def expand_results(page: Page) -> None:
-    for label in ("View more flights", "More flights"):
+    for label in ("View more flights", "More flights", "항공편 더보기", "더 많은 항공편"):
         try:
             item = page.get_by_text(label, exact=False).last
             if await item.count() and await item.is_visible():
                 await item.click(timeout=3500)
                 await page.wait_for_timeout(900)
+                print(f"expanded_results_with={label}")
                 return
         except Exception:
             pass
@@ -247,15 +351,17 @@ async def _row_text_for_price_element(item: Locator) -> str:
         return str(
             await item.evaluate(
                 """el => {
-                    const rows = [
-                        el.closest('li'),
-                        el.closest('[role="listitem"]'),
-                        el.closest('[role="button"]')
-                    ];
-                    for (const row of rows) {
-                        if (!row) continue;
-                        const text = (row.innerText || row.textContent || '').trim();
-                        if (text) return text;
+                    let node = el;
+                    for (let depth = 0; depth < 12 && node; depth += 1, node = node.parentElement) {
+                        const text = (node.innerText || node.textContent || '').trim();
+                        if (!text) continue;
+                        const upper = text.toUpperCase();
+                        const times = text.match(/\b\d{1,2}:\d{2}(?:\s?[AP]M)?\b/gi) || [];
+                        const hasRoute = upper.includes('CJJ') && upper.includes('TPE');
+                        const hasFlightShape = /nonstop|stops?|직항|경유|\bhr\b|시간/i.test(text);
+                        if (times.length >= 2 && (hasRoute || hasFlightShape)) {
+                            return text;
+                        }
                     }
                     return '';
                 }"""
@@ -266,7 +372,7 @@ async def _row_text_for_price_element(item: Locator) -> str:
 
 
 async def collect_price_candidates(page: Page) -> list[PriceCandidate]:
-    """Collect only KRW prices attached to DOM elements that look like flight rows."""
+    """Collect only KRW prices whose nearest useful ancestor looks like a flight row."""
     found: list[PriceCandidate] = []
 
     labelled = page.locator("[aria-label]")
@@ -284,22 +390,29 @@ async def collect_price_candidates(page: Page) -> list[PriceCandidate]:
             continue
         found.append(PriceCandidate(price, label or "aria-label", row_text))
 
-    # Some Google builds expose the visible price as text rather than an aria-label.
-    # This fallback is still row-scoped; it never scans the page body for the minimum.
-    rows = page.locator("li, [role='listitem'], [role='button']")
-    for index in range(await rows.count()):
-        row = rows.nth(index)
+    # Visible price text is also inspected, but the price is accepted only after
+    # climbing to a flight-shaped ancestor. We never take the page-wide minimum.
+    visible_prices = page.get_by_text(_KRW_TEXT_RE)
+    for index in range(await visible_prices.count()):
+        item = visible_prices.nth(index)
         try:
-            if not await row.is_visible():
+            if not await item.is_visible():
                 continue
-            row_text = (await row.inner_text()).strip()
+            own_text = (await item.inner_text()).strip()
         except Exception:
+            try:
+                own_text = (await item.text_content() or "").strip()
+            except Exception:
+                continue
+        values = parse_prices(own_text)
+        if not values:
             continue
+        row_text = (await _row_text_for_price_element(item)).strip()[:2200]
         if not row_looks_like_flight_result(row_text):
             continue
-        for price in parse_prices(row_text):
+        for price in values:
             if 50_000 <= price <= 1_500_000:
-                found.append(PriceCandidate(price, "flight-row text", row_text[:2200]))
+                found.append(PriceCandidate(price, "flight-row visible text", row_text))
 
     dedup: dict[tuple[int, str], PriceCandidate] = {}
     for item in found:
@@ -408,7 +521,7 @@ async def inspect_fresh_tab(
     timeout_ms: int,
     price_wait_ms: int,
     artifact_dir: Path,
-) -> tuple[Page, list[PriceCandidate], str]:
+) -> tuple[Page, list[PriceCandidate], str, CheapestTabState]:
     print(f"\n=== FRESH TAB ATTEMPT {attempt} ===", flush=True)
     page = await context.new_page()
     page.set_default_timeout(timeout_ms)
@@ -417,7 +530,7 @@ async def inspect_fresh_tab(
         await page.goto(search_url, wait_until="domcontentloaded", timeout=timeout_ms)
         print(f"fresh_url={page.url}")
         await wait_for_results(page, timeout_ms)
-        await select_cheapest(page)
+        cheapest_state = await select_cheapest(page)
         await expand_results(page)
 
         print("[7/7] Reading row-scoped prices from fresh tab", flush=True)
@@ -431,7 +544,7 @@ async def inspect_fresh_tab(
                 line.strip() for line in candidate.row_text.splitlines() if line.strip()
             )[:700]
             print(f"#{index} {candidate.price:,} KRW | {context_text or candidate.source}")
-        return page, prices, body
+        return page, prices, body, cheapest_state
     except Exception:
         await save_debug(page, artifact_dir, f"fresh-tab-{attempt}-error")
         try:
@@ -457,7 +570,8 @@ async def main() -> None:
     print("Google Flights native Edge fresh-tab probe")
     print("  CJJ -> TPE / 2026-09-18 ~ 2026-09-20")
     print("  first tab: generate canonical Google Flights URL")
-    print("  next tabs: reopen EXACT same URL and read flight-row prices")
+    print("  next tabs: reopen EXACT same URL and select Cheapest/최저가")
+    print("  only accept flight-row prices after cheapest-tab selection")
     print("  body-wide minimum fallback: DISABLED")
     print("  based on user-confirmed manual copy/open behavior")
     print(f"  fresh tabs: {max_fresh_tabs}")
@@ -485,7 +599,7 @@ async def main() -> None:
         search_url = await generate_search_url(generator, timeout_ms, artifact_dir)
 
         for attempt in range(1, max_fresh_tabs + 1):
-            page, prices, body = await inspect_fresh_tab(
+            page, prices, body, cheapest_state = await inspect_fresh_tab(
                 context,
                 search_url,
                 attempt=attempt,
@@ -494,11 +608,25 @@ async def main() -> None:
                 artifact_dir=artifact_dir,
             )
             last_page = page
+            row_lowest = prices[0].price if prices else None
+            price_match = cheapest_price_consistent(cheapest_state.advertised_price, row_lowest)
+
             if prices:
+                print("render_gate=PRICE_VISIBLE_AFTER_FRESH_TAB")
+            print(f"cheapest_tab_ready={cheapest_state.found and cheapest_state.clicked}")
+            print(f"cheapest_price_match={price_match}")
+            if cheapest_state.advertised_price is not None:
+                print(f"cheapest_advertised={cheapest_state.advertised_price:,} KRW")
+            if row_lowest is not None:
+                print(f"cheapest_row_lowest={row_lowest:,} KRW")
+
+            if cheapest_state.found and cheapest_state.clicked and prices and price_match:
                 print("\n=== SUMMARY ===")
                 print(f"fresh_tab_attempt={attempt}")
-                print(f"ui_lowest={prices[0].price:,} KRW")
-                print("acceptance=PRICE_VISIBLE_AFTER_FRESH_TAB")
+                if cheapest_state.advertised_price is not None:
+                    print(f"cheapest_advertised={cheapest_state.advertised_price:,} KRW")
+                print(f"ui_lowest={row_lowest:,} KRW")
+                print("acceptance=CHEAPEST_PRICE_VISIBLE_AFTER_FRESH_TAB")
                 print(f"artifact_dir={artifact_dir.resolve()}")
                 if keep_open_seconds > 0:
                     print(f"Browser stays open for {keep_open_seconds}s for visual confirmation ...")
@@ -507,12 +635,19 @@ async def main() -> None:
 
             unavailable = "price unavailable" in body.lower()
             print(f"fresh_tab_{attempt}_price_unavailable={unavailable}")
+            if cheapest_state.advertised_price is not None and row_lowest is not None and not price_match:
+                print(
+                    "fresh_tab_mismatch="
+                    f"tab advertised {cheapest_state.advertised_price:,} KRW but "
+                    f"row parser lowest was {row_lowest:,} KRW"
+                )
             if attempt < max_fresh_tabs:
                 await page.close()
                 await asyncio.sleep(1.0)
 
         raise RuntimeError(
-            "Generated URL was correct, but all automated fresh tabs still showed no row-scoped KRW price"
+            "Fresh tabs rendered, but the Cheapest/최저가 tab and matching row-scoped lowest price "
+            "were not both confirmed"
         )
     except Exception as exc:
         if last_page is not None:
