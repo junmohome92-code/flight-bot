@@ -44,7 +44,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install -e '.[dev]'
-      - name: Run direct generated-URL DOM diagnostic
+      - name: Test second fresh navigation of Cheapest URL
         shell: pwsh
         env:
           PYTHONUTF8: "1"
@@ -53,9 +53,12 @@ jobs:
           BROWSER_TIMEOUT_MS: "60000"
           BROWSER_DEBUG_DIR: artifacts/google-ui-ci
           BROWSER_PROFILE_DIR: artifacts/google-profile-ci
+          BROWSER_KEEP_OPEN_SECONDS: "0"
+          GOOGLE_UI_MAX_ATTEMPTS: "1"
           GOOGLE_UI_PRICE_WAIT_MS: "20000"
+          GOOGLE_UI_SEARCH_URL: "https://www.google.com/travel/flights/search?tfs=CBwQAhoeEgoyMDI2LTA5LTE4agcIARIDQ0pKcgcIARIDVFBFGh4SCjIwMjYtMDktMjBqBwgBEgNUUEVyBwgBEgNDSkpAAUgBcAGCAQsI____________AZgBAQ&hl=en&gl=kr&curr=KRW"
         run: |
-          cmd /c "python scripts\google_url_probe_ci.py > artifacts-ui-result.txt 2>&1"
+          cmd /c "python scripts\google_cheapest_fresh_probe.py > artifacts-ui-result.txt 2>&1"
           $code = $LASTEXITCODE
           Get-Content artifacts-ui-result.txt -Encoding UTF8
           Write-Host "probe_exit_code=$code"
