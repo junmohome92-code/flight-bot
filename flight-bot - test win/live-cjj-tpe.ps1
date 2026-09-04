@@ -32,11 +32,15 @@ $env:GOOGLE_UI_SEARCH_URL = 'https://www.google.com/travel/flights/search?tfs=CB
 # Do not use the user's personal Edge/Chrome profile.
 Remove-Item Env:BROWSER_CHANNEL -ErrorAction SilentlyContinue
 
-Write-Host 'Google Flights transient selection + Booking options probe'
+Write-Host 'Google Flights source-anchored pointer selection + Booking options probe'
 Write-Host '  CJJ -> TPE -> CJJ'
 Write-Host '  2026-09-18 ~ 2026-09-20'
 Write-Host '  1 adult / Economy / KRW'
 Write-Host '  canonical acceptance URL reuse: YES'
+Write-Host '  direct-price element only: YES'
+Write-Host '  broad results container rejected: YES'
+Write-Host '  DOM element.click fallback: NO'
+Write-Host '  real Playwright mouse click: YES'
 Write-Host '  transient lowest departure auto-click: YES'
 Write-Host '  transient lowest return auto-click: YES'
 Write-Host '  Booking CTA-scoped price inspection: YES'
@@ -47,9 +51,9 @@ Write-Host "  booking wait: $($env:GOOGLE_UI_BOOKING_WAIT_MS) ms"
 Write-Host "  headless: $($env:BROWSER_HEADLESS)"
 Write-Host ''
 
-& $VenvPython 'scripts\google_booking_probe.py'
+& $VenvPython 'scripts\google_booking_pointer_probe.py'
 if ($LASTEXITCODE -ne 0) {
-    throw "Google UI booking probe failed with exit code $LASTEXITCODE. Check artifacts\google-ui-win."
+    throw "Google UI pointer booking probe failed with exit code $LASTEXITCODE. Check artifacts\google-ui-win."
 }
 
 Write-Host ''
