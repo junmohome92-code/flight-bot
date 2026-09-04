@@ -51,183 +51,105 @@ Separate/self-transfer style results: allowed
 
 기존 SerpApi deep/hidden 결과와 사용자 일반 Google Flights 화면 사이에 큰 가격 차이가 확인되었습니다.
 
-CJJ↔TPE 사례에서 SerpApi 경로가 브라우저의 더 저렴한 혼합/별도티켓 스타일 결과를 놓쳤습니다.
-
 결론: 현재 프로젝트 Primary Provider로 복귀시키지 않습니다.
 
 ### 4.2 Playwright + fast-flights 생성 tfs 직링크 — 거부
 
-Google Flights route/date 자체는 정확히 로드됐습니다.
+GitHub hosted Azure runner와 사용자 Windows 일반 인터넷 모두 route/date는 로드했지만 `Price unavailable`을 반환했습니다.
 
-GitHub hosted Azure runner:
-
-```text
-CJJ -> TPE
-2026-09-18 -> 2026-09-20
-항공편 목록 로드 성공
-가격: Price unavailable
-```
-
-사용자 Windows 일반 인터넷에서도 동일하게:
-
-```text
-PriceUnavailableError:
-Google Flights loaded the route but returned Price unavailable for this IP/session
-```
-
-따라서 단순히 데이터센터 IP 문제만은 아니며 `tfs` 직링크 + 자동화 세션 경로 자체를 신뢰하지 않습니다.
+결론: `tfs` 직링크 + 자동화 세션 경로는 사용하지 않습니다.
 
 ### 4.3 fast-flights 3.1.0 parser — 거부
 
-직접 `get_flights()` 호출 시:
+`get_flights()`는 현재 Google payload에서 `IndexError`가 발생했고, raw payload의 RF511/ZE781 등 일부 후보는 실제 숫자 대신 `[[], token]` 형태였습니다.
 
-```text
-IndexError: list index out of range
-parser.py -> price = k[1][0][1]
-```
+독립 편도 최저가 합은 724,650 KRW로 사용자 일반 브라우저의 저렴한 왕복 조합과 달랐습니다.
 
-Google HTML raw payload를 공식 parser 없이 직접 분석했습니다.
-
-왕복:
-
-```text
-rows=1
-priced_rows=0
-RF511 계열 후보 price block = [[], '<token>']
-```
-
-CJJ → TPE 편도:
-
-```text
-lowest priced row = 309,900 KRW
-대한항공 다중 경유
-RF511 / ZE781 등 일부 후보 = price 없음 + token만 존재
-```
-
-TPE → CJJ 편도:
-
-```text
-lowest priced row = 414,750 KRW
-대한항공 다중 경유
-```
-
-단순 편도 최저가 합:
-
-```text
-724,650 KRW
-```
-
-이는 사용자 브라우저에서 관찰한 저렴한 왕복 조합과 다른 결과입니다.
-
-결론: `fast-flights` parser를 가격 Provider로 사용하지 않습니다. 현재 runtime에는 tfs URL 생성용 의존성만 아직 남아 있으며 real-UI Provider가 채택되면 제거할 예정입니다.
+결론: 가격 Provider로 사용하지 않습니다.
 
 ### 4.4 punitarani/fli direct Google service API — 거부
 
-PyPI에는 당시 `flights` 0.9.0까지만 있었으므로 다음 upstream source commit을 정확히 pin해서 검증했습니다.
+검증 commit:
 
 ```text
-punitarani/fli
-commit: 121d34fea056dc513258958c4262cb5a4cc033c1
+121d34fea056dc513258958c4262cb5a4cc033c1
 ```
 
-해당 소스에 다음 API가 실제 존재함을 확인했습니다.
-
-- GetShoppingResults
-- round-trip selected_flight expansion
-- GetBookingResults
-- get_booking_options()
-
-Windows 설치/API 확인은 성공했습니다.
-
-```text
-Fli booking API: OK
-```
-
-그러나 기준 시나리오 실행 결과:
-
-```text
-Fli returned no round-trip results
-```
-
-upstream에도 2026-08 기준 일반 노선 BLR→DEL이 `No flights found`로 반환되는 issue #223이 존재합니다.
-
-또 upstream issue #168에는 브라우저 BotGuard 신호가 없으면 GetBookingResults가 OTA/리셀러 목록을 축소해서 반환한다는 실험 결과가 기록돼 있습니다.
+`get_booking_options()` 존재는 확인했으나 CJJ↔TPE 기준 검색은 `Fli returned no round-trip results`였습니다. upstream issue #223에도 일반 노선 no-results 문제가 있으며, issue #168에는 브라우저 BotGuard 신호 없이 OTA/리셀러 Booking 결과가 축소된다는 보고가 있습니다.
 
 결론: HTTP-only Fli direct service를 Primary Provider로 채택하지 않습니다.
 
-## 5. 현재 채택 후보 — 실제 Google Flights UI + persistent browser
+## 5. 실제 Google Flights UI 실험 결과
 
-새 probe:
+### 5.1 Playwright가 Edge를 직접 실행한 persistent profile — 실패
 
-```text
-scripts/google_ui_probe.py
-```
+Google Flights 첫 화면부터 CJJ/TPE/날짜를 직접 입력했습니다. 즉 tfs 직링크는 사용하지 않았습니다.
 
-Windows 실행 래퍼:
+실제 결과 URL:
 
 ```text
-flight-bot - test win/02-live-cjj-tpe-visible.cmd
+.../travel/flights/search?...&hl=en&gl=kr&curr=KRW
 ```
 
-동작:
+따라서 다음은 이미 확인됐습니다.
 
 ```text
-Google Flights 첫 화면 직접 열기
-→ Where from? 에 CJJ 입력
-→ Where to? 에 TPE 입력
-→ Departure 09/18/2026
-→ Return 09/20/2026
-→ Search
-→ Cheapest
-→ 실제 렌더링된 KRW 가격 후보 수집
+Country hint: KR
+Currency: KRW
+Route/date: correct
+Browser: Microsoft Edge
+Dedicated persistent profile: yes
 ```
 
-이 probe는 다음을 사용하지 않습니다.
+그럼에도:
 
 ```text
-SerpApi             NO
-Fli direct API       NO
-fast-flights parser  NO
-tfs 직링크           NO
+price_candidates=0
+Google UI search completed but this browser session still shows Price unavailable
 ```
 
-Windows visible 모드 브라우저 우선순위:
+즉 국가/통화 파라미터 누락이 직접 원인은 아닙니다.
+
+### 5.2 현재 다음 acceptance — native Edge + CDP attach
+
+`scripts/google_ui_probe.py`를 변경했습니다.
+
+새 방식:
 
 ```text
-Microsoft Edge
-→ Google Chrome
-→ Playwright Chromium
+Windows msedge.exe를 일반 프로세스로 직접 실행
+→ dedicated user-data-dir 사용
+→ remote debugging port 오픈
+→ Playwright는 Edge를 launch하지 않고 CDP attach만 수행
+→ Google Flights UI에서 CJJ/TPE/날짜 직접 입력
 ```
 
-개인 브라우저 profile은 사용하지 않습니다.
-
-전용 persistent profile:
+환경 힌트:
 
 ```text
-artifacts/google-profile-win/
+--lang=ko-KR
+Accept-Language: ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7
+Asia/Seoul
+gl=kr
+curr=KRW
 ```
 
-디버그:
-
-```text
-artifacts/google-ui-win/cjj-tpe-results.{png,txt,html}
-artifacts/google-ui-win/cjj-tpe-error.{png,txt,html}
-```
+목표는 일반 Edge와 Playwright-launched Edge의 차이를 줄이는 것입니다.
 
 ## 6. 현재 중요한 경계
 
 `src/flight_bot/providers.py`의 runtime Provider는 아직 기존 v0.2 `tfs URL + Playwright` 구현입니다.
 
-**새 real-UI probe가 Windows 일반 회선에서 가격 표시 acceptance를 통과하기 전에는 runtime Provider를 완전히 교체하지 않습니다.**
+**native Edge CDP real-UI acceptance가 가격을 실제로 반환하기 전에는 runtime Provider를 완전히 교체하지 않습니다.**
 
-즉 현재 저장소 상태는:
+현재 상태:
 
 ```text
 Bot Core: usable
 DB/latch: usable
-Windows/Linux unit tests: usable
+Windows/Linux unit CI: usable
 Runtime Google price Provider: migration pending
-Real-UI probe: next acceptance candidate
+Native Edge CDP probe: current acceptance candidate
 ```
 
 ## 7. 다음 acceptance
@@ -242,12 +164,16 @@ flight-bot - test win
 성공 기준:
 
 ```text
+=== LOCALE DIAGNOSTICS ===
+url_gl_kr=True
+url_curr_krw=True
+...
 === SUMMARY ===
 ui_lowest=... KRW
 acceptance=PRICE_VISIBLE
 ```
 
-실패하면 다음 세 파일 중 생성된 것을 확인합니다.
+실패 시:
 
 ```text
 artifacts/google-ui-win/cjj-tpe-error.png
@@ -255,61 +181,29 @@ artifacts/google-ui-win/cjj-tpe-error.txt
 artifacts/google-ui-win/cjj-tpe-error.html
 ```
 
-### 결과별 다음 조치
+## 8. acceptance 성공 후
 
-1. 화면에도 실제 가격이 보이고 `ui_lowest`도 정상
-   - real-UI 방식 채택
-   - runtime Provider 교체
-   - row-scoped price extraction 강화
-   - 출국/귀국/Booking verification 구현
-   - fast-flights 제거
+1. runtime Provider를 real-UI 방식으로 교체
+2. 가격은 페이지 전체 min이 아니라 실제 flight row 가격만 비교
+3. 최저 출국 후보 선택 → 귀국 후보 → Booking 최종가격 검증
+4. `REQUIRE_VERIFIED_ALERTS=true` 유지
+5. fast-flights dependency 제거
+6. Docker/Ubuntu profile volume 구성
+7. Windows/Linux tests + live acceptance 재검증
 
-2. 화면에는 가격이 보이는데 probe가 가격을 못 읽음
-   - Google UI selector/parser 문제
-   - error HTML/text 기반으로 가격 row selector 수정
-
-3. Edge persistent UI 화면 자체가 `Price unavailable`
-   - 두 번째 실행에서도 같은지 확인하여 persistent session 효과 확인
-   - browser/session 제약 재평가
-   - stealth/CAPTCHA 우회 코드는 기본 전략으로 넣지 않음
-
-## 8. 이후 남은 구조 개선
-
-실가격 Provider acceptance 이후 처리할 항목:
+## 9. 이후 구조 개선
 
 - 약 10분 local cache
 - 동일 검색 single-flight coalescing
 - watch slot과 notification subscription 분리
-- provider attempt / cache hit / error 분류 logging
-- row-scoped price extraction
+- provider attempt / cache hit / error logging
 - browser process/context 재사용 검토
-- 명확한 Provider error classes 확대
-
-이 항목들은 Provider acceptance보다 뒤입니다.
-
-## 9. CI
-
-일반 push/PR:
-
-```text
-Linux Python 3.12
-- install
-- compileall src scripts tests
-- pytest
-
-Windows Python 3.12
-- install
-- compileall src scripts tests
-- pytest
-- Playwright Chromium install + launch
-```
-
-Google Flights 실검색은 hosted IP 특성 때문에 수동 `workflow_dispatch` diagnostic으로만 실행합니다.
+- Provider error taxonomy 확대
 
 ## 10. 절대 되돌리지 말 것
 
 - SerpApi를 근거 없이 Primary로 복원하지 말 것
-- `fast-flights.get_flights()`를 검증 없이 가격 source로 복원하지 말 것
+- `fast-flights.get_flights()`를 가격 source로 복원하지 말 것
 - Fli direct API를 CJJ↔TPE 실가격 source로 다시 채택하지 말 것
 - Google 가격이 없을 때 다른 숫자를 추정/합성하지 말 것
 - 수하물 미확인을 `없음`으로 바꾸지 말 것
