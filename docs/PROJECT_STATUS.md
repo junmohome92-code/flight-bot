@@ -65,13 +65,7 @@ GitHub hosted runner와 사용자 Windows 일반 회선 모두 route/date는 로
 
 ### 5.1 Playwright-launched Edge persistent profile — 실패
 
-UI에서 직접 CJJ/TPE/날짜를 입력했고 결과 URL은 정상적으로:
-
-```text
-.../travel/flights/search?...&hl=en&gl=kr&curr=KRW
-```
-
-를 생성했지만 `price_candidates=0`, `Price unavailable`이었습니다.
+UI에서 직접 CJJ/TPE/날짜를 입력했고 결과 URL은 정상적으로 `.../travel/flights/search?...&hl=en&gl=kr&curr=KRW`를 생성했지만 `price_candidates=0`, `Price unavailable`이었습니다.
 
 ### 5.2 Native Edge + CDP attach — 실패
 
@@ -88,8 +82,6 @@ UI에서 직접 CJJ/TPE/날짜를 입력했고 결과 URL은 정상적으로:
 → 가격 정상 표시
 ```
 
-이 관찰은 매우 중요합니다.
-
 따라서 현재 판단:
 
 ```text
@@ -99,11 +91,9 @@ gl=kr / curr=KRW: 정상
 문제 지점: 처음 자동 검색을 수행한 탭/세션의 결과 로딩 상태
 ```
 
-즉 URL 자체나 locale 값보다 **첫 자동검색 탭의 상태**가 우선 의심 대상입니다.
-
 ## 6. 현재 acceptance — generated URL → fresh new tab
 
-`scripts/google_ui_probe.py`를 사용자 성공 동작과 동일하게 변경했습니다.
+`scripts/google_ui_probe.py`는 다음 순서입니다.
 
 ```text
 1. native Edge + dedicated profile 실행
@@ -111,11 +101,24 @@ gl=kr / curr=KRW: 정상
 3. 생성된 최종 /travel/flights/search URL 확보
 4. 동일 Edge context에서 새 탭 생성
 5. 정확히 같은 URL을 fresh navigation
-6. 새 탭에서 KRW flight-row 가격 읽기
-7. 실패 시 최대 여러 fresh tab 반복
+6. Cheapest / More flights 필요 시 적용
+7. flight-row scoped KRW 가격만 읽기
+8. 실패 시 여러 fresh tab 반복
 ```
 
-중요: 이는 이전의 "같은 탭 reload/retry"와 다릅니다.
+### 6.1 2026-09-04 probe hardening
+
+현재 main 검수에서 acceptance 오판 가능성을 제거했습니다.
+
+- page body 전체의 KRW 최소값 fallback 제거
+- `li` / `role=listitem` / `role=button` 중 실제 flight-row 형태만 가격 후보로 인정
+- fresh tab에서 결과 shell이 먼저 뜬 뒤 가격이 늦게 채워질 수 있으므로 row 가격을 기본 15초 추가 대기
+- `generated_search_url`, `fresh_url`, `price_candidates` 출력 유지
+- 실패 진단에 URL / `navigator.webdriver` / language / timezone / Footer Language·Location·Currency 포함
+- screenshot / body text / HTML artifact 유지
+- pure helper unit test 추가
+
+아직 사용자 Windows에서 이 hardening 버전의 live acceptance 결과는 **미확인**입니다.
 
 성공 기준:
 
@@ -124,14 +127,6 @@ gl=kr / curr=KRW: 정상
 fresh_tab_attempt=N
 ui_lowest=... KRW
 acceptance=PRICE_VISIBLE_AFTER_FRESH_TAB
-```
-
-디버그:
-
-```text
-artifacts/google-ui-win/generator-tab.{png,txt,html}
-artifacts/google-ui-win/fresh-tab-N.{png,txt,html}
-artifacts/google-ui-win/final-error.{png,txt,html}
 ```
 
 ## 7. 현재 중요한 경계
@@ -150,13 +145,21 @@ Runtime Google price Provider: migration pending
 Generated-URL fresh-tab probe: current acceptance candidate
 ```
 
-## 8. fresh tab도 자동화에서 실패하면 다음 분기
+## 8. CI 상태/정책
+
+2026-09-04 기준 이전 HEAD `8621a40`의 GitHub Actions run `33838752221`은 완료 `success`였습니다.
+
+- `unit-linux`: success
+- `unit-windows`: success
+- hosted `cjj-tpe-ui-diagnostic`: push에서는 skipped
+
+기존 manual diagnostic job은 Windows-visible 전용 probe를 Ubuntu/headless에서 실행하도록 되어 있어 실제 `workflow_dispatch` 시 유효한 acceptance가 될 수 없었습니다. 이 job은 제거했고, 실제 Google Flights acceptance는 사용자 Windows의 `02-live-cjj-tpe-visible.cmd`로만 수행합니다.
+
+## 9. fresh tab도 자동화에서 실패하면 다음 분기
 
 사용자가 동일 URL을 수동 새 창에서 열면 가격이 보이는데 `context.new_page()`에서는 계속 `Price unavailable`이면, 차이는 URL이 아니라 **자동화가 붙어 있는 browser context**입니다.
 
 그 경우 다음 Primary 후보는 Playwright를 더 숨기는 방식이 아니라 **일반 사용자 브라우저 안에서 동작하는 browser extension/content-script sidecar**입니다.
-
-개념:
 
 ```text
 일반 Edge/Chrome profile
@@ -165,21 +168,20 @@ Generated-URL fresh-tab probe: current acceptance candidate
 → localhost flight-bot API로 결과 전달
 ```
 
-이 방식은 사용자가 이미 가격이 정상 표시된 일반 브라우저 세션을 그대로 사용합니다.
-
 stealth/CAPTCHA/BotGuard 우회를 기본 전략으로 넣지 않습니다.
 
-## 9. acceptance 성공 후
+## 10. acceptance 성공 후
 
 1. runtime Provider를 검증된 방식으로 교체
 2. 페이지 전체 min이 아닌 실제 flight row 가격만 비교
 3. 최저 출국 후보 → 귀국 후보 → Booking 최종가격 검증
-4. `REQUIRE_VERIFIED_ALERTS=true` 유지
-5. fast-flights dependency 제거
-6. Docker/Ubuntu 또는 browser-sidecar 운영구조 결정
-7. Windows/Linux tests + live acceptance 재검증
+4. observed와 verified를 구분
+5. `REQUIRE_VERIFIED_ALERTS=true` 유지
+6. fast-flights dependency 제거
+7. Docker/Ubuntu 또는 browser-sidecar 운영구조 결정
+8. Windows/Linux tests + live acceptance 재검증
 
-## 10. 이후 구조 개선
+## 11. 이후 구조 개선
 
 - 약 10분 local cache
 - 동일 검색 single-flight coalescing
@@ -188,7 +190,7 @@ stealth/CAPTCHA/BotGuard 우회를 기본 전략으로 넣지 않습니다.
 - browser process/context 재사용 검토
 - Provider error taxonomy 확대
 
-## 11. 절대 되돌리지 말 것
+## 12. 절대 되돌리지 말 것
 
 - SerpApi를 근거 없이 Primary로 복원하지 말 것
 - `fast-flights.get_flights()`를 가격 source로 복원하지 말 것
