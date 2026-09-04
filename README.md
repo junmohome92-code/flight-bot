@@ -29,17 +29,9 @@
 
 현재 acceptance 후보는 `scripts/google_ui_probe.py`입니다. 이 방식은 Google Flights 첫 화면을 실제 브라우저로 열고 출발지/도착지/날짜를 UI에 직접 입력합니다.
 
-Windows visible 테스트는 다음 순서로 실제 브라우저 엔진을 사용합니다.
+Windows visible 테스트는 **native Microsoft Edge + 전용 persistent profile**을 사용합니다. 개인 브라우저 프로필은 건드리지 않고 `artifacts/google-profile-win/`을 사용합니다.
 
-```text
-Microsoft Edge
-→ Google Chrome
-→ Playwright Chromium
-```
-
-개인 브라우저 프로필은 건드리지 않고 `artifacts/google-profile-win/` 전용 persistent profile을 사용합니다.
-
-**중요:** 현재 runtime `providers.py`는 아직 기존 v0.2 tfs URL Provider입니다. Windows real-UI acceptance에서 가격 표시가 확인되면 다음 작업에서 UI persistent 방식으로 runtime Provider를 교체하고 `fast-flights` 의존성을 제거합니다.
+**중요:** 현재 runtime `providers.py`는 아직 기존 v0.2 tfs URL Provider입니다. Windows real-UI acceptance에서 가격 표시가 확인되면 다음 작업에서 검증된 방식으로 runtime Provider를 교체하고 `fast-flights` 의존성을 제거합니다.
 
 ## 핵심 봇 구조
 
@@ -104,16 +96,27 @@ Google Flights 첫 화면
 → TPE 입력
 → 2026-09-18 / 2026-09-20 입력
 → Search
-→ Cheapest
-→ 실제 KRW 가격 후보 수집
+→ generated_search_url 저장
+→ 동일 browser context에 fresh NEW tab 생성
+→ generated_search_url을 fresh navigation
+→ Cheapest 필요 시 선택
+→ More flights 필요 시 확장
+→ flight-row에 붙은 KRW 가격만 수집
 ```
+
+페이지 전체에서 보이는 원화 숫자의 최소값을 fallback으로 사용하지 않습니다.
 
 성공 판정:
 
 ```text
+generated_search_url=...
+=== FRESH TAB ATTEMPT N ===
+fresh_url=...
+price_candidates=...
 === SUMMARY ===
+fresh_tab_attempt=N
 ui_lowest=... KRW
-acceptance=PRICE_VISIBLE
+acceptance=PRICE_VISIBLE_AFTER_FRESH_TAB
 ```
 
 가격은 실시간으로 변하므로 특정 금액을 강제하지 않습니다. 사용자 일반 브라우저에서 같은 조건으로 약 33만 원대 왕복 결과가 관찰된 적이 있습니다.
@@ -121,12 +124,13 @@ acceptance=PRICE_VISIBLE
 디버그 파일:
 
 ```text
-artifacts/google-ui-win/cjj-tpe-results.png
-artifacts/google-ui-win/cjj-tpe-results.txt
-artifacts/google-ui-win/cjj-tpe-results.html
+artifacts/google-ui-win/generator-tab.{png,txt,html}
+artifacts/google-ui-win/fresh-tab-N.{png,txt,html}
+artifacts/google-ui-win/fresh-tab-N-error.{png,txt,html}
+artifacts/google-ui-win/final-error.{png,txt,html}
 ```
 
-실패 시 `cjj-tpe-error.*`가 저장됩니다.
+실패 시 URL, `navigator.webdriver`, language, timezone, Footer Language/Location/Currency와 body/HTML/screenshot을 확인합니다.
 
 ## Docker 실행
 
@@ -173,9 +177,11 @@ runtime Provider를 persistent UI 방식으로 교체할 때 browser profile 설
 경유/혼합/별도티켓: 허용
 ```
 
-1차 acceptance는 real browser UI에서 KRW 가격이 실제로 보이고 봇이 가격 후보를 읽는 것입니다.
+1차 acceptance는 real browser UI의 fresh tab에서 KRW 가격이 실제로 보이고 봇이 **flight-row scoped observed price**를 읽는 것입니다.
 
 2차 acceptance는 그 중 목표가 이하 후보를 선택해 귀국편/Booking 단계까지 내려가 **실제 판매 가능한 최종 가격**을 검증하는 것입니다.
+
+`observed`와 `verified`를 혼동하지 않습니다.
 
 ## CI
 
@@ -194,7 +200,7 @@ Windows Python 3.12
   → Playwright Chromium 실제 launch
 ```
 
-실제 Google Flights UI 진단은 데이터센터 IP 특성 때문에 `workflow_dispatch` 수동 job으로만 둡니다.
+실제 Google Flights acceptance는 데이터센터 IP와 headed/native Edge 조건 때문에 GitHub hosted runner의 성공 조건으로 사용하지 않습니다. 사용자 Windows에서 `02-live-cjj-tpe-visible.cmd`로 검증합니다.
 
 ## 테스트 범위
 
@@ -204,7 +210,7 @@ python -m compileall -q src scripts tests
 pytest -q
 ```
 
-현재 unit test 범위: KRW 가격 파싱, 고정 슬롯 1/2/3, pause 점유, delete 후 번호 재사용, SQLite WAL, 목표가 latch/re-arm, ALERTED 상태의 상세검증 억제.
+현재 unit test 범위: KRW 가격 파싱, Google UI probe row-scope/diagnostic helper, 고정 슬롯 1/2/3, pause 점유, delete 후 번호 재사용, SQLite WAL, 목표가 latch/re-arm, ALERTED 상태의 상세검증 억제.
 
 ## 주의사항
 
