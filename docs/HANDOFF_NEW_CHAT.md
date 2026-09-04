@@ -18,7 +18,7 @@ docs/HANDOFF_NEW_CHAT.md
 
 SerpApi / fast-flights parser / Fli direct API / tfs 직링크 방식은 이미 실패 근거가 있으므로 반복하지 않습니다.
 
-현재 gate는 **Google Flights UI로 검색 URL 생성 → 동일 URL을 새 탭에서 fresh open → 가격 읽기**입니다.
+현재 gate는 **Google Flights UI로 검색 URL 생성 → 동일 URL을 새 탭에서 fresh open → flight-row 가격 읽기**입니다.
 
 ## 3. 기준 acceptance
 
@@ -56,11 +56,9 @@ URL/검색조건 생성 = 정상
 문제 = 첫 자동검색 탭 또는 자동화 context에서의 결과 로딩 상태
 ```
 
-이 관찰이 기존 retry 실험보다 우선합니다.
-
 ## 5. 현재 코드
 
-`scripts/google_ui_probe.py`는 이제 다음 순서입니다.
+`scripts/google_ui_probe.py`는 다음 순서입니다.
 
 ```text
 native Edge + dedicated profile
@@ -68,15 +66,25 @@ native Edge + dedicated profile
 → generated_search_url 출력
 → 동일 context에 NEW TAB 생성
 → generated_search_url을 그대로 goto
-→ 새 탭에서 flight-row KRW 가격 읽기
+→ Cheapest / More flights 필요 시 적용
+→ flight-row scoped KRW 가격 읽기
 → 필요 시 여러 fresh tab 반복
 ```
 
-이전의 "같은 탭 재검색"과 다릅니다. 사용자 성공 동작을 그대로 자동화하는 테스트입니다.
+2026-09-04 검수에서 다음 hardening을 추가했습니다.
+
+- body 전체 원화 숫자의 minimum fallback 제거
+- 실제 flight-row 형태의 DOM에서 나온 가격만 후보 인정
+- fresh tab 가격이 늦게 채워지는 경우를 위해 기본 15초 row-price wait
+- 실패 진단에 Footer Language/Location/Currency + navigator.webdriver/language/timezone + URL 포함
+- `generator-tab`, `fresh-tab-N`, `fresh-tab-N-error`, `final-error` artifact 유지
+- helper unit test 추가
+
+runtime `src/flight_bot/providers.py`는 아직 기존 tfs URL Provider이며 **이번 hardening에서는 변경하지 않았습니다.**
 
 ## 6. 사용자가 다음에 할 작업
 
-최신 ZIP 또는 `git pull` 후:
+최신 `main`을 받은 뒤:
 
 ```text
 flight-bot - test win
@@ -90,14 +98,32 @@ flight-bot - test win
 ```text
 generated_search_url=...
 === FRESH TAB ATTEMPT N ===
+fresh_url=...
 price_candidates=...
+#1 xxx,xxx KRW | 항공사/시간/경유정보
 === SUMMARY ===
 fresh_tab_attempt=N
 ui_lowest=... KRW
 acceptance=PRICE_VISIBLE_AFTER_FRESH_TAB
 ```
 
-실패 시 `generator-tab`, `fresh-tab-N`, `final-error` artifact를 확인합니다.
+실패 시 다음 출력과 artifact를 전달합니다.
+
+```text
+fresh_tab_N_price_unavailable=...
+footer_location=...
+footer_currency=...
+navigator_webdriver=...
+navigator_language=...
+timezone=...
+url=...
+```
+
+```text
+artifacts/google-ui-win/generator-tab.{png,txt,html}
+artifacts/google-ui-win/fresh-tab-N.{png,txt,html}
+artifacts/google-ui-win/final-error.{png,txt,html}
+```
 
 ## 7. 결과 분기
 
@@ -107,16 +133,18 @@ acceptance=PRICE_VISIBLE_AFTER_FRESH_TAB
 
 1. UI로 canonical search URL 생성 또는 안정적으로 재사용
 2. 가격 수집은 fresh tab에서 수행
-3. 페이지 전체 min이 아니라 실제 flight row 가격만 비교
-4. 최저 출국 후보 → 귀국 후보 → Booking 최종가격 검증
-5. `REQUIRE_VERIFIED_ALERTS=true` 유지
-6. fast-flights 제거
-7. Docker/Ubuntu 운영 가능성 검증
-8. tests/docs 갱신
+3. 실제 flight row 가격만 비교
+4. 표시 가격은 `observed`
+5. 최저 출국 후보 → 귀국 후보 → Booking 최종가격 검증
+6. Booking 단계에서 검증된 값만 `verified`
+7. `REQUIRE_VERIFIED_ALERTS=true` 유지
+8. fast-flights 제거
+9. Docker/Ubuntu 운영 가능성 검증
+10. tests/docs 갱신
 
 ### B. 사용자가 수동 새 창에서는 가격이 보이지만 자동 `context.new_page()`에서는 계속 `Price unavailable`
 
-이 경우 차이는 URL이 아니라 **Playwright/CDP가 붙어 있는 browser context**로 봅니다.
+차이는 URL이 아니라 **Playwright/CDP가 붙어 있는 browser context**로 봅니다.
 
 다음 Primary 후보는 stealth/BotGuard 우회가 아니라 일반 사용자 브라우저 안에서 동작하는 extension/content-script sidecar입니다.
 
@@ -131,25 +159,18 @@ acceptance=PRICE_VISIBLE_AFTER_FRESH_TAB
 
 Provider 방향은 맞고 selector 문제입니다. `fresh-tab-N.html/txt` 기준으로 row-scoped selector만 수정합니다.
 
-## 8. 이미 확인한 실패 경로 — 반복 금지
+## 8. CI
+
+이전 기준 HEAD `8621a40`의 GitHub Actions run `33838752221`은 Linux/Windows unit job 모두 `success`였습니다.
+
+실제 live Google Flights acceptance는 GitHub hosted runner가 아니라 사용자 Windows에서 수행합니다. 기존 Ubuntu/headless manual UI job은 Windows-visible probe와 모순되어 제거했습니다.
+
+## 9. 이미 확인한 실패 경로 — 반복 금지
 
 - SerpApi: 브라우저 대비 비싼 결과 / 저렴한 혼합·별도티켓 누락 사례
 - tfs 직링크 + Playwright: hosted + Windows 모두 `Price unavailable`
 - fast-flights 3.1: parser `IndexError`, 일부 가격 대신 token
 - Fli direct API commit `121d34f...`: CJJ↔TPE no-results; upstream no-results/BotGuard limitations
-
-## 9. 현재 runtime 주의
-
-현재 `src/flight_bot/providers.py`는 아직 v0.2 tfs URL 기반 코드입니다.
-
-**fresh-tab acceptance 성공 전에는 운영 Provider 완료라고 말하면 안 됩니다.**
-
-```text
-Core / DB / latch / channels: 구현됨
-unit CI: 구현됨
-real Google price acceptance: 진행 중
-runtime Provider migration: acceptance 뒤에 진행
-```
 
 ## 10. 유지 요구사항
 
@@ -163,25 +184,3 @@ runtime Provider migration: acceptance 뒤에 진행
 - 검색 순차 실행
 - 가격/수하물 추정 금지
 - 위탁수하물 미확인 = `정보 확인 불가`
-
-## 11. 새 채팅 시작용 프롬프트
-
-```text
-Flight Bot 작업을 이어가자.
-repo: junmohome92-code/flight-bot
-branch: main
-
-먼저 README.md, docs/PROJECT_STATUS.md, docs/HANDOFF_NEW_CHAT.md를 읽어.
-기존 SerpApi / fast-flights parser / Fli direct API / tfs 직링크 실패 실험은 반복하지 마.
-
-가장 중요한 최신 관찰:
-자동화가 만든 Google Flights 검색 결과 URL을 사용자가 복사해서 새 창/새 탭에서 직접 열면 가격이 정상 표시됐다.
-
-현재 gate는 scripts/google_ui_probe.py의 generated URL → fresh NEW TAB 자동 재오픈 테스트다.
-내가 02-live-cjj-tpe-visible.cmd 결과를 줄 테니 그 결과에 따라 분기해.
-
-fresh tab에서 가격이 나오면 runtime Provider로 승격하고 row-scoped price → return 선택 → Booking 검증 → fast-flights 제거 → Docker/docs/tests까지 진행해.
-
-수동 새 창은 되는데 자동 context.new_page는 계속 Price unavailable이면 Playwright를 더 숨기려 하지 말고 일반 사용자 브라우저 extension/content-script sidecar를 다음 Primary 후보로 검토해.
-가격/수하물은 절대 추정하지 말고 fail-closed 유지해.
-```
