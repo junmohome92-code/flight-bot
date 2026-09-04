@@ -1,36 +1,75 @@
 # flight-bot - test win
 
-Windows 10/11 PowerShell에서 현재 `flight-bot` 소스를 그대로 사용해 Playwright + Chromium과 CJJ↔TPE 실가격을 검증하는 전용 테스트 디렉토리입니다.
+Windows 10/11 PowerShell에서 현재 `flight-bot` 소스의 Google Flights 실가격 경로를 검증하는 전용 테스트 디렉토리입니다.
 
-이 디렉토리는 봇 코드를 복제하지 않습니다. 한 단계 위의 실제 프로젝트 소스를 설치해서 테스트하므로 Linux/WSL/Windows가 같은 코드를 검증합니다.
+이 폴더는 봇 코드를 복제하지 않습니다. 한 단계 위의 실제 프로젝트 소스를 그대로 사용합니다.
 
-## 가장 쉬운 방법
+## 실행 순서
 
-탐색기에서 이 폴더의 `01-setup-and-unit-test.cmd`를 먼저 실행한 뒤, `02-live-cjj-tpe-visible.cmd`를 실행하세요.
-
-첫 파일은 다음을 자동 수행합니다.
+탐색기에서 다음 순서로 실행합니다.
 
 ```text
-Windows용 가상환경 .venv-win 생성
+01-setup-and-unit-test.cmd
+02-live-cjj-tpe-visible.cmd
+```
+
+`01`은 다음을 자동 수행합니다.
+
+```text
+Python 3.12 확인/설치
+→ Windows용 .venv-win 생성
 → 프로젝트 + 테스트 의존성 설치
 → Playwright Chromium 설치
 → pytest 실행
 ```
 
-두 번째 파일은 실제 Chromium 창을 띄워 다음 조건으로 Google Flights를 조회합니다.
+`02`는 **실제 Google Flights UI**를 사용합니다.
 
 ```text
 CJJ (청주) → TPE (타이베이)
 2026-09-18 ~ 2026-09-20
 성인 1명 / Economy / KRW
-경유·별도티켓 허용
+경유·혼합·별도티켓 허용
 ```
 
-성공하면 콘솔에 JSON 결과가 출력되고 `artifacts/live-smoke-win/`에 디버그 스크린샷이 저장됩니다.
+중요: 현재 `02`는 다음 경로를 사용하지 않습니다.
+
+```text
+fast-flights parser      사용 안 함
+Fli direct service API   사용 안 함
+Google tfs 직링크        사용 안 함
+```
+
+대신 Google Flights 첫 화면을 열고 `Where from?`, `Where to?`, `Departure`, `Return` UI에 직접 값을 넣은 뒤 Search 버튼을 누릅니다.
+
+## 브라우저 방식
+
+Windows visible 테스트에서는 다음 순서로 브라우저를 시도합니다.
+
+```text
+Microsoft Edge
+→ Google Chrome
+→ Playwright Chromium
+```
+
+개인 Edge/Chrome 프로필은 사용하지 않습니다. 아래에 별도 전용 프로필을 만들어 반복 테스트에서 쿠키/세션을 유지합니다.
+
+```text
+artifacts/google-profile-win/
+```
+
+디버그 결과는 아래에 저장됩니다.
+
+```text
+artifacts/google-ui-win/
+  cjj-tpe-results.png/.txt/.html
+  또는
+  cjj-tpe-error.png/.txt/.html
+```
+
+`artifacts/`는 Git에서 무시합니다.
 
 ## PowerShell에서 직접 실행
-
-프로젝트 루트가 `C:\work\flight-bot`이라고 가정하면:
 
 ```powershell
 cd 'C:\work\flight-bot\flight-bot - test win'
@@ -38,21 +77,43 @@ cd 'C:\work\flight-bot\flight-bot - test win'
 .\live-cjj-tpe.ps1
 ```
 
-브라우저를 화면에 띄우지 않으려면:
+headless 테스트:
 
 ```powershell
 .\live-cjj-tpe.ps1 -Headless
 ```
 
-## 기대 결과
+## 성공 판정
 
-사용자 일반 브라우저에서 같은 조건으로 확인했던 Google Flights 최저가는 약 33만 원대였습니다. 가격은 실시간으로 변할 수 있으므로 정확히 같은 숫자를 강제하지 않습니다. 테스트는 Google Flights가 실제 KRW 운임을 반환하고 봇이 이를 정상적으로 파싱하는지를 확인합니다.
+콘솔 마지막에 다음이 나오면 1차 acceptance 성공입니다.
 
-`Price unavailable`이 나오면 Google이 해당 IP/세션에 운임을 제공하지 않은 것입니다. GitHub hosted runner에서는 이 현상이 실제 확인됐지만, 가정용 Windows/WSL IP에서는 별도로 확인해야 합니다.
+```text
+=== SUMMARY ===
+ui_lowest=... KRW
+acceptance=PRICE_VISIBLE
+```
+
+가격은 실시간으로 변하므로 정확히 특정 숫자를 강제하지 않습니다. 기존 일반 브라우저에서는 같은 CJJ↔TPE 조건에서 약 33만 원대 왕복 결과가 관찰된 적이 있습니다.
+
+visible 모드는 결과/실패 후 브라우저를 잠시 열어 두므로 화면도 직접 확인할 수 있습니다.
+
+## 지금까지 폐기한 실가격 경로
+
+### fast-flights parser
+
+`fast-flights 3.1.0`은 현재 Google payload의 `[[], token]` 가격 블록을 만나 `IndexError`로 전체 파싱이 깨졌습니다. raw payload를 직접 확인했을 때 RF511/ZE781 같은 직항 후보는 가격 숫자 대신 다음 단계용 토큰만 반환됐습니다.
+
+### Fli direct API
+
+GitHub 최신 소스를 고정 설치해 왕복 확장 + `GetBookingResults`까지 시험했지만 CJJ↔TPE 2026-09-18~20에서 `Fli returned no round-trip results`였습니다. upstream에도 2026-08 기준 일반 노선이 `No flights found`로 반환되는 동일 계열 이슈가 있습니다. 따라서 현재 Provider 후보에서 제외합니다.
+
+### Google tfs 직링크 + Playwright
+
+노선/날짜/항공편 목록은 맞게 로드됐지만 GitHub hosted runner와 사용자 Windows 일반 회선 모두 `Price unavailable`이 확인됐습니다. 따라서 검색 첫 화면부터 실제 UI 입력 방식으로 변경했습니다.
 
 ## 주의
 
-- `.venv-win`은 Windows 전용 가상환경이라 Git에 커밋되지 않습니다.
 - API Key는 필요 없습니다.
-- Chromium은 테스트용으로 로컬에 설치됩니다.
-- 테스트가 끝나도 기존 Linux/WSL 프로젝트 파일은 변경하지 않습니다.
+- Google Flights는 공개 개발자 API가 아니므로 UI/DOM 변경 가능성이 있습니다.
+- 개인 Edge/Chrome 프로필을 연결하지 마세요. 전용 profile만 사용합니다.
+- 실제 구매 전에는 판매처에서 최종 가격/수하물/환불조건을 다시 확인해야 합니다.
