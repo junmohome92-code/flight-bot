@@ -4,7 +4,7 @@
 
 ## 1. 현재 단계
 
-**Google Flights Provider Migration — observed gate PASSED / selection + booking gate ACTIVE**
+**Google Flights Provider Migration — observed gate PASSED / exact row selection + booking gate ACTIVE**
 
 Bot Core/DB/알림 구조는 유지합니다. runtime `src/flight_bot/providers.py`는 아직 기존 v0.2 Provider이며 교체 전입니다.
 
@@ -103,9 +103,9 @@ acceptance=CHEAPEST_OBSERVED_BEFORE_PRICE_UNAVAILABLE
 
 `final_dom_price_candidates=0`은 gate 실패가 아닙니다. 목적이 최종 DOM이 아니라 Google 후속 상태변경 전에 실제 row snapshot을 보존하는 것이기 때문입니다.
 
-## 7. 현재 gate — transient row 자동 선택 → Booking options
+## 7. 현재 gate — 정확한 transient row 자동 선택 → Booking options
 
-새 script:
+script:
 
 ```text
 scripts/google_booking_probe.py
@@ -113,26 +113,75 @@ scripts/google_booking_probe.py
 
 Windows `02-live-cjj-tpe-visible.cmd`가 이 script를 실행합니다.
 
-흐름:
+### 1차 auto-click 시도에서 발견된 결함
+
+첫 Booking probe 실행에서는:
 
 ```text
-1. fixed acceptance canonical URL에서 Cheapest tfu URL 확보
-2. 새 Cheapest 문서를 Google JS 이전부터 감시
-3. CJJ→TPE transient rows를 짧게 모아 최저가 row 자동 클릭
-4. TPE→CJJ returning rows가 나타나면 최저 row 자동 클릭
+departure_selected=922,965 KRW
+return_click_count=0
+```
+
+가 나왔습니다.
+
+로그의 `departure_row`가 실제 한 항공편 row가 아니라 `Best / Cheapest / Fetching results / 여러 항공편 전체`를 포함한 큰 결과-list container였습니다. 즉 transient price capture는 성공했지만 auto-click 단계가 summary/list 가격 element에서 너무 큰 ancestor까지 올라가 잘못 클릭했습니다.
+
+따라서 이 실행은 **출국편 선택 성공으로 인정하지 않습니다.**
+
+### 현재 수정
+
+`google_booking_probe.py`는 이제 price element에서 가장 가까운 **정확한 compact flight row**만 후보로 인정합니다.
+
+필수 조건:
+
+```text
+요청 방향 route(CJJ-TPE 또는 TPE-CJJ) 정확히 1회
+시간 표현 2~4개
+row 내 KRW 가격 1~3개
+row text 2200자 이하
+Nonstop/stops/직항/경유/hr/시간 중 flight-shape marker 존재
+```
+
+따라서 여러 항공편을 동시에 포함한 results container는 후보에서 제외됩니다.
+
+또한 transient capture 순간에 정확한 row/target에:
+
+```text
+data-flight-bot-row-id
+data-flight-bot-target-id
+```
+
+를 붙이고 그 동일 DOM target을 클릭합니다. 이후 ancestor를 다시 추정하지 않습니다.
+
+추가 보강:
+
+- 후보 settle window: 약 70ms
+- fixed acceptance에서는 이미 확인된 canonical Cheapest `tfu` URL을 직접 열어 bootstrap 시간을 단축
+- departure→returning phase를 `sessionStorage`에 저장해 문서 navigation이 발생해도 phase/click 기록 유지
+- broad-container regression test 추가
+
+현재 흐름:
+
+```text
+1. canonical Cheapest tfu URL 직접 open (acceptance speed-up only)
+2. Google JS 이전부터 exact CJJ→TPE transient row 감시
+3. exact row 후보만 짧게 모아 lowest 자동 클릭
+4. TPE→CJJ returning exact row 자동 클릭
 5. Google Booking options / Book / Continue CTA 주변의 KRW 가격 수집
 6. page-wide KRW minimum 사용 금지
 ```
-
-현재 auto-click debounce는 약 140ms입니다. 사용자 실측에서 실제 출국 row가 약 435~470ms 구간에 함께 나타난 것을 근거로 후보 여러 개를 짧게 모은 뒤 lowest를 선택합니다.
 
 성공 기준:
 
 ```text
 departure_click_count=1
+departure_row_shape=times:2 route_count:1 prices:1 ...
 departure_selected=... KRW
+
 return_click_count=1
+return_row_shape=times:2 route_count:1 prices:1 ...
 return_selected=... KRW
+
 booking_option_candidates=>0
 
 === SUMMARY ===
@@ -141,7 +190,7 @@ observed=True
 booking_option_visible=True
 external_checkout_verified=False
 verified=False
-acceptance=GOOGLE_BOOKING_OPTION_REACHED_FROM_TRANSIENT_ROWS
+acceptance=GOOGLE_BOOKING_OPTION_REACHED_FROM_EXACT_TRANSIENT_ROWS
 ```
 
 ## 8. verified 경계
@@ -163,12 +212,12 @@ verified=False
 
 `src/flight_bot/providers.py`는 아직 기존 v0.2 `tfs URL + Playwright` 구현입니다.
 
-selection/Booking gate가 안정적으로 통과하기 전에는 runtime Provider migration을 완료했다고 말하지 않습니다.
+exact selection/Booking gate가 안정적으로 통과하기 전에는 runtime Provider migration을 완료했다고 말하지 않습니다.
 
 ## 10. 이후 순서
 
-1. transient 출국 row 자동 선택 검증
-2. returning TPE→CJJ row 자동 선택 검증
+1. exact transient 출국 row 자동 선택 검증
+2. returning TPE→CJJ exact row 자동 선택 검증
 3. Google Booking option 가격/CTA 검증
 4. 외부 판매처 checkout final total 검증 범위 결정
 5. observed / verified 모델 반영
