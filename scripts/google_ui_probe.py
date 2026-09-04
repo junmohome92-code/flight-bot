@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from playwright.async_api import Browser, Locator, Page, async_playwright
+from playwright.async_api import Browser, BrowserContext, Locator, Page, async_playwright
 
 
 ORIGIN = "CJJ"
@@ -20,6 +20,9 @@ RETURN = "09/20/2026"
 GOOGLE_FLIGHTS_URL = "https://www.google.com/travel/flights?hl=en&gl=kr&curr=KRW"
 _KRW_RE = re.compile(r"₩\s*([0-9][0-9,]*)")
 _WON_RE = re.compile(r"([0-9][0-9,]*)\s+(?:South Korean won|Korean won|KRW)", re.I)
+_TIME_RE = re.compile(r"\b\d{1,2}:\d{2}(?:\s?[AP]M)?\b", re.I)
+_STOP_RE = re.compile(r"\b(?:nonstop|\d+\s+stops?)\b", re.I)
+_DURATION_RE = re.compile(r"\b\d+\s*hr(?:\s*\d+\s*min)?\b", re.I)
 
 
 @dataclass(frozen=True)
@@ -36,11 +39,28 @@ def env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def parse_price(text: str | None) -> int | None:
+def parse_prices(text: str | None) -> list[int]:
     if not text:
-        return None
-    match = _KRW_RE.search(text) or _WON_RE.search(text)
-    return int(match.group(1).replace(",", "")) if match else None
+        return []
+    values = [int(raw.replace(",", "")) for raw in _KRW_RE.findall(text)]
+    values.extend(int(raw.replace(",", "")) for raw in _WON_RE.findall(text))
+    return sorted(set(values))
+
+
+def parse_price(text: str | None) -> int | None:
+    values = parse_prices(text)
+    return values[0] if values else None
+
+
+def row_looks_like_flight_result(text: str | None) -> bool:
+    if not text:
+        return False
+    upper = text.upper()
+    has_route = ORIGIN in upper and DESTINATION in upper
+    time_count = len(_TIME_RE.findall(text))
+    if time_count < 2:
+        return False
+    return has_route or bool(_STOP_RE.search(text) or _DURATION_RE.search(text))
 
 
 def free_local_port() -> int:
@@ -196,7 +216,8 @@ async def wait_for_results(page: Page, timeout_ms: int) -> None:
         if "price unavailable" in body and ("cjj" in body or "cheongju" in body):
             return
         await page.wait_for_timeout(500)
-    raise RuntimeError("Google Flights results did not become visible before timeout")
+    body = (await page.locator("body").inner_text())[:2500]
+    raise RuntimeError(f"Google Flights results did not become visible. Body sample:\n{body}")
 
 
 async def select_cheapest(page: Page) -> None:
@@ -221,8 +242,33 @@ async def expand_results(page: Page) -> None:
             pass
 
 
+async def _row_text_for_price_element(item: Locator) -> str:
+    try:
+        return str(
+            await item.evaluate(
+                """el => {
+                    const rows = [
+                        el.closest('li'),
+                        el.closest('[role="listitem"]'),
+                        el.closest('[role="button"]')
+                    ];
+                    for (const row of rows) {
+                        if (!row) continue;
+                        const text = (row.innerText || row.textContent || '').trim();
+                        if (text) return text;
+                    }
+                    return '';
+                }"""
+            )
+        )
+    except Exception:
+        return ""
+
+
 async def collect_price_candidates(page: Page) -> list[PriceCandidate]:
+    """Collect only KRW prices attached to DOM elements that look like flight rows."""
     found: list[PriceCandidate] = []
+
     labelled = page.locator("[aria-label]")
     for index in range(await labelled.count()):
         item = labelled.nth(index)
@@ -233,29 +279,42 @@ async def collect_price_candidates(page: Page) -> list[PriceCandidate]:
         price = parse_price(label)
         if price is None or not 50_000 <= price <= 1_500_000:
             continue
-        row_text = ""
-        try:
-            row_text = await item.evaluate(
-                """el => {
-                    const row = el.closest('li, [role="listitem"], [role="button"]');
-                    return row ? (row.innerText || row.textContent || '') : '';
-                }"""
-            )
-        except Exception:
-            pass
-        found.append(PriceCandidate(price, label or "aria-label", row_text.strip()[:2200]))
+        row_text = (await _row_text_for_price_element(item)).strip()[:2200]
+        if not row_looks_like_flight_result(row_text):
+            continue
+        found.append(PriceCandidate(price, label or "aria-label", row_text))
 
-    if not found:
-        body = await page.locator("body").inner_text()
-        for raw in _KRW_RE.findall(body):
-            price = int(raw.replace(",", ""))
+    # Some Google builds expose the visible price as text rather than an aria-label.
+    # This fallback is still row-scoped; it never scans the page body for the minimum.
+    rows = page.locator("li, [role='listitem'], [role='button']")
+    for index in range(await rows.count()):
+        row = rows.nth(index)
+        try:
+            if not await row.is_visible():
+                continue
+            row_text = (await row.inner_text()).strip()
+        except Exception:
+            continue
+        if not row_looks_like_flight_result(row_text):
+            continue
+        for price in parse_prices(row_text):
             if 50_000 <= price <= 1_500_000:
-                found.append(PriceCandidate(price, "body-text fallback", ""))
+                found.append(PriceCandidate(price, "flight-row text", row_text[:2200]))
 
     dedup: dict[tuple[int, str], PriceCandidate] = {}
     for item in found:
         dedup[(item.price, item.row_text)] = item
     return sorted(dedup.values(), key=lambda item: item.price)
+
+
+async def wait_for_price_candidates(page: Page, timeout_ms: int) -> list[PriceCandidate]:
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+    while asyncio.get_running_loop().time() < deadline:
+        prices = await collect_price_candidates(page)
+        if prices:
+            return prices
+        await page.wait_for_timeout(750)
+    return []
 
 
 async def save_debug(page: Page, artifact_dir: Path, stem: str) -> None:
@@ -276,7 +335,26 @@ async def save_debug(page: Page, artifact_dir: Path, stem: str) -> None:
         pass
 
 
+def _clean_setting_line(value: str) -> str:
+    return value.replace("\u200b", "").replace("\u2060", "").strip()
+
+
+def footer_setting(body: str, label: str) -> str | None:
+    lines = [_clean_setting_line(line) for line in body.splitlines() if _clean_setting_line(line)]
+    wanted = label.lower()
+    for index, line in enumerate(lines):
+        lower = line.lower()
+        if lower == wanted and index + 1 < len(lines):
+            return lines[index + 1]
+        if lower.startswith(wanted) and len(line) > len(label):
+            value = line[len(label):].strip(" :\t")
+            if value:
+                return value
+    return None
+
+
 async def print_session_diagnostics(page: Page, label: str) -> None:
+    body = await page.locator("body").inner_text()
     runtime = await page.evaluate(
         """() => ({
             webdriver: navigator.webdriver,
@@ -286,12 +364,17 @@ async def print_session_diagnostics(page: Page, label: str) -> None:
     )
     print(f"\n=== {label} SESSION ===")
     print(f"url={page.url}")
+    print(f"url_gl_kr={'gl=kr' in page.url.lower()}")
+    print(f"url_curr_krw={'curr=krw' in page.url.lower()}")
+    print(f"footer_language={footer_setting(body, 'Language')}")
+    print(f"footer_location={footer_setting(body, 'Location')}")
+    print(f"footer_currency={footer_setting(body, 'Currency')}")
     print(f"navigator_webdriver={runtime.get('webdriver')}")
     print(f"navigator_language={runtime.get('language')}")
     print(f"timezone={runtime.get('timezone')}")
 
 
-async def generate_search_url(page: Page, timeout_ms: int) -> str:
+async def generate_search_url(page: Page, timeout_ms: int, artifact_dir: Path) -> str:
     print("[1/7] Opening Google Flights landing page", flush=True)
     await page.goto(GOOGLE_FLIGHTS_URL, wait_until="domcontentloaded", timeout=timeout_ms)
     await dismiss_consent(page)
@@ -308,7 +391,7 @@ async def generate_search_url(page: Page, timeout_ms: int) -> str:
 
     print("[5/7] Waiting for first result page", flush=True)
     await wait_for_results(page, timeout_ms)
-    await save_debug(page, Path(os.getenv("BROWSER_DEBUG_DIR", "artifacts/google-ui-win")), "generator-tab")
+    await save_debug(page, artifact_dir, "generator-tab")
     await print_session_diagnostics(page, "GENERATOR TAB")
     search_url = page.url
     if "/travel/flights/search" not in search_url:
@@ -318,33 +401,44 @@ async def generate_search_url(page: Page, timeout_ms: int) -> str:
 
 
 async def inspect_fresh_tab(
-    context,
+    context: BrowserContext,
     search_url: str,
     *,
     attempt: int,
     timeout_ms: int,
+    price_wait_ms: int,
     artifact_dir: Path,
 ) -> tuple[Page, list[PriceCandidate], str]:
     print(f"\n=== FRESH TAB ATTEMPT {attempt} ===", flush=True)
     page = await context.new_page()
     page.set_default_timeout(timeout_ms)
-    print("[6/7] Opening generated search URL in a NEW tab", flush=True)
-    await page.goto(search_url, wait_until="domcontentloaded", timeout=timeout_ms)
-    await wait_for_results(page, timeout_ms)
-    await select_cheapest(page)
-    await expand_results(page)
-    print("[7/7] Reading prices from fresh tab", flush=True)
-    body = await page.locator("body").inner_text()
-    prices = await collect_price_candidates(page)
-    await save_debug(page, artifact_dir, f"fresh-tab-{attempt}")
-    await print_session_diagnostics(page, f"FRESH TAB {attempt}")
-    print(f"price_candidates={len(prices)}")
-    for index, candidate in enumerate(prices[:12], start=1):
-        context_text = " | ".join(
-            line.strip() for line in candidate.row_text.splitlines() if line.strip()
-        )[:700]
-        print(f"#{index} {candidate.price:,} KRW | {context_text or candidate.source}")
-    return page, prices, body
+    try:
+        print("[6/7] Opening generated search URL in a NEW tab", flush=True)
+        await page.goto(search_url, wait_until="domcontentloaded", timeout=timeout_ms)
+        print(f"fresh_url={page.url}")
+        await wait_for_results(page, timeout_ms)
+        await select_cheapest(page)
+        await expand_results(page)
+
+        print("[7/7] Reading row-scoped prices from fresh tab", flush=True)
+        prices = await wait_for_price_candidates(page, price_wait_ms)
+        body = await page.locator("body").inner_text()
+        await save_debug(page, artifact_dir, f"fresh-tab-{attempt}")
+        await print_session_diagnostics(page, f"FRESH TAB {attempt}")
+        print(f"price_candidates={len(prices)}")
+        for index, candidate in enumerate(prices[:12], start=1):
+            context_text = " | ".join(
+                line.strip() for line in candidate.row_text.splitlines() if line.strip()
+            )[:700]
+            print(f"#{index} {candidate.price:,} KRW | {context_text or candidate.source}")
+        return page, prices, body
+    except Exception:
+        await save_debug(page, artifact_dir, f"fresh-tab-{attempt}-error")
+        try:
+            await print_session_diagnostics(page, f"FRESH TAB {attempt} ERROR")
+        except Exception:
+            pass
+        raise
 
 
 async def main() -> None:
@@ -354,6 +448,7 @@ async def main() -> None:
         raise SystemExit("This acceptance probe must run visible; BROWSER_HEADLESS=false")
 
     timeout_ms = int(os.getenv("BROWSER_TIMEOUT_MS", "60000"))
+    price_wait_ms = max(1000, int(os.getenv("GOOGLE_UI_PRICE_WAIT_MS", "15000")))
     artifact_dir = Path(os.getenv("BROWSER_DEBUG_DIR", "artifacts/google-ui-win"))
     profile_dir = Path(os.getenv("BROWSER_PROFILE_DIR", "artifacts/google-profile-win"))
     max_fresh_tabs = max(1, min(int(os.getenv("GOOGLE_UI_MAX_ATTEMPTS", "3")), 5))
@@ -362,9 +457,11 @@ async def main() -> None:
     print("Google Flights native Edge fresh-tab probe")
     print("  CJJ -> TPE / 2026-09-18 ~ 2026-09-20")
     print("  first tab: generate canonical Google Flights URL")
-    print("  next tabs: reopen EXACT same URL and read prices")
+    print("  next tabs: reopen EXACT same URL and read flight-row prices")
+    print("  body-wide minimum fallback: DISABLED")
     print("  based on user-confirmed manual copy/open behavior")
     print(f"  fresh tabs: {max_fresh_tabs}")
+    print(f"  row-price wait per fresh tab: {price_wait_ms} ms")
 
     profile_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -383,8 +480,9 @@ async def main() -> None:
         context = browser.contexts[0]
         generator = context.pages[0] if context.pages else await context.new_page()
         generator.set_default_timeout(timeout_ms)
+        last_page = generator
 
-        search_url = await generate_search_url(generator, timeout_ms)
+        search_url = await generate_search_url(generator, timeout_ms, artifact_dir)
 
         for attempt in range(1, max_fresh_tabs + 1):
             page, prices, body = await inspect_fresh_tab(
@@ -392,6 +490,7 @@ async def main() -> None:
                 search_url,
                 attempt=attempt,
                 timeout_ms=timeout_ms,
+                price_wait_ms=price_wait_ms,
                 artifact_dir=artifact_dir,
             )
             last_page = page
@@ -413,7 +512,7 @@ async def main() -> None:
                 await asyncio.sleep(1.0)
 
         raise RuntimeError(
-            "Generated URL was correct, but all automated fresh tabs still showed no usable KRW price"
+            "Generated URL was correct, but all automated fresh tabs still showed no row-scoped KRW price"
         )
     except Exception as exc:
         if last_page is not None:
