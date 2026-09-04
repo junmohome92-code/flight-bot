@@ -11,42 +11,33 @@ if (-not (Test-Path $VenvPython)) {
     throw 'Run setup-and-unit-test.ps1 first. .venv-win was not found.'
 }
 
-# PyPI currently publishes flights only through 0.9.0, while the Google
-# round-trip expansion / GetBookingResults code under test lives in this
-# newer upstream commit. Pin the exact GitHub source ZIP so the test is
-# reproducible and does not require Git to be installed on Windows.
-$FliCommit = '121d34fea056dc513258958c4262cb5a4cc033c1'
-$FliSource = "https://github.com/punitarani/fli/archive/$FliCommit.zip"
+$env:BROWSER_HEADLESS = if ($Headless) { 'true' } else { 'false' }
+$env:BROWSER_TIMEOUT_MS = '60000'
+$env:BROWSER_DEBUG_DIR = (Join-Path $RepoRoot 'artifacts\google-ui-win')
+$env:BROWSER_PROFILE_DIR = (Join-Path $RepoRoot 'artifacts\google-profile-win')
+$env:BROWSER_KEEP_OPEN_SECONDS = if ($Headless) { '0' } else { '8' }
 
-Write-Host 'Fli direct Google Flights service probe'
+# Do not use the personal Edge/Chrome profile. The probe uses its own persistent
+# profile so Google sees a normal browser session over repeated checks without
+# risking the user's real browser data.
+Remove-Item Env:BROWSER_CHANNEL -ErrorAction SilentlyContinue
+
+Write-Host 'Google Flights real UI probe'
 Write-Host '  CJJ -> TPE'
 Write-Host '  2026-09-18 ~ 2026-09-20'
 Write-Host '  1 adult / Economy / KRW'
-Write-Host '  sort: CHEAPEST'
-Write-Host '  round-trip expansion + booking verification'
-Write-Host "  fli source commit: $($FliCommit.Substring(0, 12))"
+Write-Host '  direct tfs URL: NO'
+Write-Host '  fast-flights parser: NO'
+Write-Host '  Fli direct API: NO'
+Write-Host '  persistent browser profile: YES'
+Write-Host "  headless: $($env:BROWSER_HEADLESS)"
 Write-Host ''
 
-Write-Host '[1/2] Installing/confirming pinned Fli GitHub source ...'
-& $VenvPython -m pip install --disable-pip-version-check --quiet --upgrade $FliSource
+& $VenvPython 'scripts\google_ui_probe.py'
 if ($LASTEXITCODE -ne 0) {
-    throw "Installing pinned Fli source failed with exit code $LASTEXITCODE."
-}
-
-# Fail immediately if the installed source does not expose the APIs required by
-# this probe. This avoids mistaking an older PyPI package for the pinned build.
-& $VenvPython -c "from fli.search import SearchFlights; assert hasattr(SearchFlights, 'get_booking_options'); print('Fli booking API: OK')"
-if ($LASTEXITCODE -ne 0) {
-    throw "Pinned Fli API verification failed with exit code $LASTEXITCODE."
-}
-
-Write-Host '[2/2] Querying Google Flights internal service ...'
-Write-Host ''
-& $VenvPython 'scripts\fli_live_probe.py'
-if ($LASTEXITCODE -ne 0) {
-    throw "Fli live probe failed with exit code $LASTEXITCODE."
+    throw "Google UI live probe failed with exit code $LASTEXITCODE. Check artifacts\google-ui-win."
 }
 
 Write-Host ''
 Write-Host 'Probe complete.'
-Write-Host 'Paste the itinerary list and SUMMARY output back into ChatGPT.'
+Write-Host 'Paste the price candidate list and SUMMARY output into the next ChatGPT chat.'
