@@ -1,18 +1,16 @@
-# Windows Naver Flights test
+# Windows Naver Flights SSE test
 
-현재는 Naver Flights SSE API 경로만 검증합니다.
+Windows에서는 브라우저 없이 Naver Flights SSE 응답을 직접 검증합니다.
 
-고정 조건:
+고정 실조회 조건:
 
 ```text
 CJJ -> TPE -> CJJ
 2026-09-18 ~ 2026-09-20
-성인 1명 / 일반석 / 직항만
+성인 1명 / 이코노미 / 직항 / 왕복
 ```
 
-브라우저 DOM을 파싱하지 않고 네이버 항공권 SSE 응답에서 가격/편명/시간을 읽습니다. 예약/결제 페이지로 이동하지 않습니다.
-
-## 1. Naver 가격 추출 테스트
+## 1. 가격/항공편 실조회
 
 더블클릭:
 
@@ -20,20 +18,24 @@ CJJ -> TPE -> CJJ
 02-NAVER-flight-test.bat
 ```
 
-`.venv-provider-poc`이 없으면 자동으로 준비합니다.
+`.venv-provider-poc`이 없으면 테스트용 Python 환경을 자동 준비합니다.
 
-성공 시:
+성공 시 핵심 출력:
 
 ```text
 POC_STATUS=PASS
 source=NAVER_SSE_API
-direct_candidate_count=1 이상
+direct_candidate_count=...
 lowest_direct_price=...
-naver_advertised_lowest_direct=...
-booking_navigation_performed=False
+candidate_1=...
+  outbound=항공사 편명 | 시간 -> 시간
+  return=항공사 편명 | 시간 -> 시간
+...
 ```
 
-실패 시 자료:
+가능한 왕복 조합을 가격순으로 정렬하며 기본 출력은 TOP 5입니다.
+
+진단 자료:
 
 ```text
 artifacts\naver-flight-poc\response.sse.txt
@@ -42,7 +44,7 @@ artifacts\naver-flight-poc\diagnostics.json
 artifacts\naver-flight-poc\result.json
 ```
 
-## 2. Naver -> Telegram 실제 푸시 테스트
+## 2. Naver SSE -> Telegram 실제 푸시
 
 더블클릭:
 
@@ -50,7 +52,7 @@ artifacts\naver-flight-poc\result.json
 03-NAVER-TELEGRAM-E2E.bat
 ```
 
-처음 실행하면 `telegram-test.env`를 자동 생성하고 메모장으로 엽니다.
+처음 실행하면 `telegram-test.env`를 만들고 메모장으로 엽니다.
 
 ```text
 TELEGRAM_BOT_TOKEN=본인_봇토큰
@@ -62,11 +64,11 @@ TELEGRAM_ALLOWED_CHAT_IDS=본인_CHAT_ID
 진행 순서:
 
 ```text
-Telegram bot/chat 사전 확인
--> Naver Flights SSE API 실제 조회
--> 직항 왕복 가격/편명/시간 추출
+Telegram bot/chat 확인
+-> Naver Flights SSE 실조회
+-> 왕복 조합 가격순 TOP 5 구성
+-> 가는편/오는편 항공사·편명·시간 포함
 -> Telegram 테스트 메시지 1회 전송
--> 종료
 ```
 
 성공 시:
@@ -75,10 +77,9 @@ Telegram bot/chat 사전 확인
 E2E_STATUS=PASS
 source=NAVER_SSE_API
 telegram_message_sent=True
-booking_navigation_performed=False
 ```
 
-유효한 항공권 행을 만들지 못하면 Telegram 메시지를 보내지 않습니다.
+실조회가 실패하면 Telegram 메시지는 보내지 않습니다.
 
 ## 수동 준비
 
@@ -88,19 +89,12 @@ booking_navigation_performed=False
 01-setup-and-unit-test.cmd
 ```
 
-## 현재 파일
+현재 Windows 테스트 파일:
 
 ```text
-01-setup-and-unit-test.cmd        선택: 수동 준비
-02-NAVER-flight-test.bat          Naver 실조회/가격 추출
-03-NAVER-TELEGRAM-E2E.bat         Naver -> Telegram 실제 푸시
-telegram-test.env.example         Telegram 테스트용 템플릿
-setup-and-unit-test.ps1           공통 준비
-```
-
-실제 probe:
-
-```text
-scripts\naver_flight_probe.py
-scripts\naver_telegram_e2e.py
+01-setup-and-unit-test.cmd
+02-NAVER-flight-test.bat
+03-NAVER-TELEGRAM-E2E.bat
+telegram-test.env.example
+setup-and-unit-test.ps1
 ```
