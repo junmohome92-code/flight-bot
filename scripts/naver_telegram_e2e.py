@@ -3,18 +3,16 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
-import sys
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from naver_flight_probe_runtime import (
+from naver_flight_probe import (
     DEFAULT_DEPART,
     DEFAULT_DESTINATION,
     DEFAULT_ORIGIN,
     DEFAULT_RETURN,
-    collect_naver_visible_results,
+    collect_naver_api_results,
 )
 
 
@@ -70,12 +68,17 @@ def _format_message(result, origin: str, destination: str, depart: str, return_d
         "🧪 네이버 항공권 E2E 테스트",
         f"✈️ {origin.upper()} → {destination.upper()} 왕복",
         f"📅 {depart} ~ {return_date}",
-        "직항 검색결과 화면 표시 가격",
+        "네이버 항공권 SSE API · 직항",
     ]
     for index, row in enumerate(result.rows[:4], start=1):
         times = row.get("times") or []
-        time_text = " → ".join(times[:2]) if len(times) >= 2 else "시간 정보 확인 불가"
-        lines.append(f"{index}. {int(row['price']):,}KRW · {time_text}")
+        out_time = " → ".join(times[:2]) if len(times) >= 2 else "시간 정보 확인 불가"
+        ret_time = " → ".join(times[2:4]) if len(times) >= 4 else "시간 정보 확인 불가"
+        lines.append(
+            f"{index}. {int(row['price']):,}원 · "
+            f"{row.get('outbound_flight')} {out_time} / "
+            f"{row.get('return_flight')} {ret_time}"
+        )
     lines.extend(
         [
             "",
@@ -96,26 +99,20 @@ async def run(args: argparse.Namespace) -> int:
     if not chat_ids:
         raise RuntimeError(f"TELEGRAM_ALLOWED_CHAT_IDS is empty in {env_path}")
 
-    # Deliberately send the test only to the first configured ID.  This avoids
-    # accidentally blasting every production recipient while validating E2E.
     chat_id = chat_ids[0]
     print("[1/3] Checking Telegram bot/chat ...")
     bot_name, chat_name = await asyncio.to_thread(_validate_telegram, token, chat_id)
     print(f"telegram_bot=@{bot_name}")
     print(f"telegram_chat={chat_name} ({chat_id})")
 
-    print("[2/3] Running real Naver Flights visible Edge search ...")
-    result = await collect_naver_visible_results(
+    print("[2/3] Querying real Naver Flights SSE API ...")
+    result = await collect_naver_api_results(
         origin=args.origin,
         destination=args.destination,
         depart=args.depart,
         return_date=args.return_date,
-        navigation_timeout=args.navigation_timeout,
         result_timeout=args.result_timeout,
         artifact_dir=args.artifact_dir,
-        headless=False,
-        keep_open=args.keep_open,
-        failure_keep_open=args.failure_keep_open,
     )
 
     message = _format_message(
@@ -135,8 +132,9 @@ async def run(args: argparse.Namespace) -> int:
 
     print("\n=== NAVER -> TELEGRAM E2E ===")
     print("E2E_STATUS=PASS")
+    print("source=NAVER_SSE_API")
     print(f"direct_candidate_count={len(result.rows)}")
-    print(f"lowest_visible_direct_price={int(result.rows[0]['price']):,} KRW")
+    print(f"lowest_direct_price={int(result.rows[0]['price']):,} KRW")
     print(f"telegram_chat_id={chat_id}")
     print("telegram_message_sent=True")
     print("booking_navigation_performed=False")
@@ -146,23 +144,18 @@ async def run(args: argparse.Namespace) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Naver Flights to Telegram visible E2E test")
+    parser = argparse.ArgumentParser(description="Naver Flights SSE API to Telegram E2E test")
     parser.add_argument("--origin", default=DEFAULT_ORIGIN)
     parser.add_argument("--destination", default=DEFAULT_DESTINATION)
     parser.add_argument("--depart", default=DEFAULT_DEPART)
     parser.add_argument("--return-date", default=DEFAULT_RETURN)
-    parser.add_argument("--navigation-timeout", type=int, default=60)
-    parser.add_argument("--result-timeout", type=int, default=70)
-    parser.add_argument("--keep-open", type=int, default=5)
-    parser.add_argument("--failure-keep-open", type=int, default=20)
+    parser.add_argument("--result-timeout", type=int, default=30)
     parser.add_argument("--artifact-dir", default="artifacts/naver-telegram-e2e")
     parser.add_argument("--env-file", default=str(DEFAULT_ENV_FILE))
     return parser.parse_args()
 
 
 if __name__ == "__main__":
-    if not sys.platform.startswith("win"):
-        raise SystemExit("This E2E test is intended for Windows visible Edge testing")
     try:
         raise SystemExit(asyncio.run(run(parse_args())))
     except Exception as exc:
