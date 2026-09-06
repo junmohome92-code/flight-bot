@@ -8,6 +8,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SLOT_DESIGN_CAPACITY = 10
 CURRENT_SLOT_LIMIT = 10
+MAX_SEARCH_CONCURRENCY = 2
 
 
 class Settings(BaseSettings):
@@ -23,16 +24,23 @@ class Settings(BaseSettings):
     search_interval_hours: int = Field(default=2, ge=1, le=24)
     daily_summary_hour: int = Field(default=8, ge=0, le=23)
 
-    # Fixed slot IDs 1..10 are now available to the product. The setting may be
+    # Up to two independent Google searches may overlap. A small stagger avoids
+    # launching both requests in the exact same instant, reducing burstiness.
+    search_concurrency: int = Field(default=2, ge=1, le=MAX_SEARCH_CONCURRENCY)
+    search_stagger_seconds: int = Field(default=5, ge=0, le=30)
+
+    # Fixed slot IDs 1..10 are available to the product. The setting may be
     # lowered for a deployment, but can never exceed the validated design cap.
     slot_active_limit: int = Field(default=CURRENT_SLOT_LIMIT, ge=1, le=SLOT_DESIGN_CAPACITY)
 
     # Google Flights / Playwright
     browser_headless: bool = True
-    browser_timeout_ms: int = 45_000
-    browser_block_assets: bool = True
+    browser_timeout_ms: int = 60_000
+    # Keep the default surface as close as practical to the successful visible
+    # acceptance path. Asset blocking remains available as an opt-in only.
+    browser_block_assets: bool = False
     browser_debug_dir: str = ""
-    # Kept for config compatibility only. Runtime price searches use an
+    # Kept for config compatibility only. Runtime price searches use a fresh
     # isolated BrowserContext per search so cookies/cache/site storage do not
     # carry over between two-hour observations.
     browser_profile_dir: str = ""
