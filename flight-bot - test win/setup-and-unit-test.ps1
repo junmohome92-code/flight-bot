@@ -60,7 +60,7 @@ if (-not (Test-Path $VenvPython)) {
     Write-Host '[3/6] Reusing existing .venv-win'
 }
 
-Write-Host '[4/6] Installing flight-bot + tested dependency constraints ...'
+Write-Host '[4/6] Installing provider POC dependencies ...'
 & $VenvPython -m pip install --upgrade pip
 Assert-LastExitCode 'pip upgrade'
 & $VenvPython -m pip install -c 'constraints.txt' -e '.[dev]'
@@ -77,12 +77,12 @@ if (-not $EdgeCandidates) {
 }
 Write-Host ("[5/6] Edge found: " + $EdgeCandidates[0])
 
-Write-Host '[6/6] Running unit tests ...'
-& $VenvPython -m pytest -q
-Assert-LastExitCode 'pytest'
+Write-Host '[6/6] Running provider POC contract tests ...'
+& $VenvPython -m pytest -q tests/test_provider_poc.py tests/test_windows_test_harness.py
+Assert-LastExitCode 'provider POC contract tests'
 
 Write-Host ''
-Write-Host 'Windows setup/unit test complete.'
-Write-Host 'Next:'
+Write-Host 'Windows provider POC setup complete.'
+Write-Host 'You can now double-click either:'
 Write-Host '  02-NAVER-flight-test.bat'
 Write-Host '  03-SKYSCANNER-flight-test.bat'
