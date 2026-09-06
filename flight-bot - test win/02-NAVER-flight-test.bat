@@ -17,13 +17,13 @@ set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 
 echo ==================================================
-echo  NAVER FLIGHTS POC - CJJ to TPE round trip
+echo  NAVER FLIGHTS SSE API POC - CJJ to TPE round trip
 echo  2026-09-18 to 2026-09-20 / direct only
-echo  Visible Microsoft Edge / results page only
+echo  No browser DOM parsing / no booking navigation
 echo ==================================================
 echo.
 
-".venv-provider-poc\Scripts\python.exe" "scripts\naver_flight_probe_runtime.py"
+".venv-provider-poc\Scripts\python.exe" "scripts\naver_flight_probe.py"
 set RC=%ERRORLEVEL%
 
 echo.
@@ -31,9 +31,8 @@ if "%RC%"=="0" (
   echo NAVER POC finished: PASS
 ) else (
   echo NAVER POC finished: FAIL ^(exit %RC%^)
-  echo Check artifacts\naver-flight-poc\page.png
-  echo       artifacts\naver-flight-poc\page.txt
-  echo       artifacts\naver-flight-poc\page.html
+  echo Check artifacts\naver-flight-poc\response.sse.txt
+  echo       artifacts\naver-flight-poc\response.json
   echo       artifacts\naver-flight-poc\diagnostics.json
   echo       artifacts\naver-flight-poc\result.json
 )
