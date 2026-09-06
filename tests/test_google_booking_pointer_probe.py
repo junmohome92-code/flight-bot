@@ -1,5 +1,7 @@
 from flight_bot.google_ui_contract import (
+    MIN_RETURN_ADJUSTMENT,
     choose_lowest_candidate,
+    departure_capture_ready,
     flight_card_is_specific,
     parse_krw_prices,
 )
@@ -22,14 +24,13 @@ def departure_row(price: int = 335_906) -> str:
     """
 
 
-def return_row_without_route(price: int = 340_000) -> str:
+def return_row(price: int = 0) -> str:
     return f"""
     2:20 PM – 5:45 PM
     EASTAR JET
     2 hr 25 min
     Nonstop
-    ₩{price:,}
-    round trip
+    +₩{price:,}
     """
 
 
@@ -63,33 +64,23 @@ def test_search_results_container_is_rejected():
     assert flight_card_is_specific(text, "CJJ", "TPE") is False
 
 
-def test_return_card_may_omit_route_after_returning_page_is_confirmed():
-    text = return_row_without_route()
-    assert flight_card_is_specific(text, "TPE", "CJJ") is False
-    assert flight_card_is_specific(text, "TPE", "CJJ", allow_missing_route=True) is True
-
-
-def test_return_card_still_rejects_reverse_departure_route():
-    text = "2:20 PM – 5:45 PM\nEASTAR JET\n2 hr 25 min\nCJJ–TPE\nNonstop\n₩340,000"
-    assert flight_card_is_specific(text, "TPE", "CJJ", allow_missing_route=True) is False
-
-
-def test_advertised_cheapest_blocks_expensive_stable_fallback():
-    expensive = candidate(922_965, "5:20 PM – 10:25 AM+1\nKorean Air\n18 hr 5 min\nCJJ–TPE\n2 stops\n₩922,965")
+def test_advertised_cheapest_blocks_expensive_fallback():
+    expensive = candidate(
+        922_965,
+        "5:20 PM – 10:25 AM+1\nKorean Air\n18 hr 5 min\nCJJ–TPE\n2 stops\n₩922,965",
+    )
     assert choose_lowest_candidate(
         [expensive], origin="CJJ", destination="TPE", advertised_price=335_906
     ) is None
 
 
-def test_disappeared_cheapest_snapshot_beats_connected_expensive_row():
-    # Selection is intentionally based on preserved snapshots; there is no
-    # source.isConnected field or DOM liveness requirement in this policy.
-    cheap = candidate(335_906, departure_row(335_906), seen=435.0, ident="cheap-disappeared")
+def test_disappeared_cheapest_snapshot_beats_stable_expensive_row():
+    cheap = candidate(335_906, departure_row(335_906), seen=435.0, ident="cheap")
     expensive = candidate(
         922_965,
-        "5:20 PM – 10:25 AM+1\nKorean Air, Asiana Airlines\n18 hr 5 min\nCJJ–TPE\n2 stops\n₩922,965",
+        "5:20 PM – 10:25 AM+1\nKorean Air\n18 hr 5 min\nCJJ–TPE\n2 stops\n₩922,965",
         seen=500.0,
-        ident="expensive-stable",
+        ident="expensive",
     )
     chosen = choose_lowest_candidate(
         [expensive, cheap], origin="CJJ", destination="TPE", advertised_price=335_906
@@ -97,19 +88,62 @@ def test_disappeared_cheapest_snapshot_beats_connected_expensive_row():
     assert chosen is cheap
 
 
-def test_unhinted_selection_still_chooses_lowest_captured_row():
-    cheap = candidate(335_906, departure_row(335_906), ident="cheap")
-    higher = candidate(415_400, departure_row(415_400), ident="higher")
-    chosen = choose_lowest_candidate([higher, cheap], origin="CJJ", destination="TPE")
-    assert chosen is cheap
+def test_loading_single_row_is_not_ready_even_when_price_matches():
+    assert departure_capture_ready(
+        candidate_count=1,
+        elapsed_ms=1800,
+        advertised_stable_ms=800,
+        loading=True,
+        capture_window_ms=1500,
+    ) is False
 
 
-def test_route_less_return_candidate_can_be_selected_in_return_phase():
-    ret = candidate(340_000, return_row_without_route(), ident="return")
-    chosen = choose_lowest_candidate(
+def test_loading_multiple_rows_can_be_ready_after_capture_and_debounce():
+    assert departure_capture_ready(
+        candidate_count=4,
+        elapsed_ms=1800,
+        advertised_stable_ms=500,
+        loading=True,
+        capture_window_ms=1500,
+    ) is True
+
+
+def test_finished_loading_allows_one_row_for_thin_route():
+    assert departure_capture_ready(
+        candidate_count=1,
+        elapsed_ms=1800,
+        advertised_stable_ms=500,
+        loading=False,
+        capture_window_ms=1500,
+    ) is True
+
+
+def test_return_adjustment_can_be_zero():
+    assert parse_krw_prices("+₩0", min_price=MIN_RETURN_ADJUSTMENT) == [0]
+    text = return_row(0)
+    assert flight_card_is_specific(
+        text,
+        "TPE",
+        "CJJ",
+        allow_missing_route=True,
+        min_price=MIN_RETURN_ADJUSTMENT,
+    ) is True
+    ret = candidate(0, text, ident="return-zero")
+    assert choose_lowest_candidate(
         [ret],
         origin="TPE",
         destination="CJJ",
         allow_missing_route=True,
-    )
-    assert chosen is ret
+        min_price=MIN_RETURN_ADJUSTMENT,
+    ) is ret
+
+
+def test_return_card_rejects_reverse_departure_route():
+    text = "2:20 PM – 5:45 PM\nEASTAR JET\n2 hr 25 min\nCJJ–TPE\nNonstop\n+₩0"
+    assert flight_card_is_specific(
+        text,
+        "TPE",
+        "CJJ",
+        allow_missing_route=True,
+        min_price=MIN_RETURN_ADJUSTMENT,
+    ) is False
