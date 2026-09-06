@@ -65,24 +65,27 @@ def _validate_telegram(token: str, chat_id: str) -> tuple[str, str]:
 
 def _format_message(result, origin: str, destination: str, depart: str, return_date: str) -> str:
     lines = [
-        "🧪 네이버 항공권 E2E 테스트",
+        "🧪 네이버 항공권 SSE E2E 테스트",
         f"✈️ {origin.upper()} → {destination.upper()} 왕복",
         f"📅 {depart} ~ {return_date}",
-        "네이버 항공권 SSE API · 직항",
+        "직항 · 성인 1명 · 이코노미 · 가격순 TOP 5",
+        "",
     ]
-    for index, row in enumerate(result.rows[:4], start=1):
+    for index, row in enumerate(result.rows[:5], start=1):
         times = row.get("times") or []
         out_time = " → ".join(times[:2]) if len(times) >= 2 else "시간 정보 확인 불가"
         ret_time = " → ".join(times[2:4]) if len(times) >= 4 else "시간 정보 확인 불가"
-        lines.append(
-            f"{index}. {int(row['price']):,}원 · "
-            f"{row.get('outbound_flight')} {out_time} / "
-            f"{row.get('return_flight')} {ret_time}"
+        lines.extend(
+            [
+                f"{index}. {int(row['price']):,}원",
+                f"   가는편: {row.get('outbound_airline')} {row.get('outbound_flight')} · {out_time}",
+                f"   오는편: {row.get('return_airline')} {row.get('return_flight')} · {ret_time}",
+            ]
         )
     lines.extend(
         [
             "",
-            "※ 테스트 메시지입니다. 예약/결제 페이지로 이동하지 않았습니다.",
+            "※ 네이버 항공권 검색 응답 기준이며 예약/결제 페이지로 이동하지 않습니다.",
             f"네이버 항공권 검색결과: {result.url}",
         ]
     )
@@ -115,19 +118,16 @@ async def run(args: argparse.Namespace) -> int:
         artifact_dir=args.artifact_dir,
     )
 
-    message = _format_message(
-        result,
-        args.origin,
-        args.destination,
-        args.depart,
-        args.return_date,
-    )
     print("[3/3] Sending Telegram test notification ...")
     await asyncio.to_thread(
         _telegram_request,
         token,
         "sendMessage",
-        {"chat_id": chat_id, "text": message, "disable_web_page_preview": "true"},
+        {
+            "chat_id": chat_id,
+            "text": _format_message(result, args.origin, args.destination, args.depart, args.return_date),
+            "disable_web_page_preview": "true",
+        },
     )
 
     print("\n=== NAVER -> TELEGRAM E2E ===")
@@ -137,7 +137,6 @@ async def run(args: argparse.Namespace) -> int:
     print(f"lowest_direct_price={int(result.rows[0]['price']):,} KRW")
     print(f"telegram_chat_id={chat_id}")
     print("telegram_message_sent=True")
-    print("booking_navigation_performed=False")
     print(f"result_url={result.url}")
     print(f"artifact_dir={result.artifact_dir}")
     return 0
