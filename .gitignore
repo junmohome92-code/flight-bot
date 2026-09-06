@@ -12,10 +12,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
-.venv-win/
 .venv-provider-poc/
 *.db
 *.sqlite3
 artifacts/
-artifacts-live-result.txt
-/debug/
