@@ -5,7 +5,7 @@ import inspect
 import re
 from datetime import date
 
-from .config import SLOT_DESIGN_CAPACITY, Settings
+from .config import Settings
 from .db import Database, StaleSlotError
 from .models import ALERT_ARMED, ALERT_SENDING, ALERTED, FlightOffer, WatchSlot
 from .providers import GoogleFlightsPlaywrightProvider, ProviderError
@@ -58,8 +58,38 @@ class FlightService:
         )
 
     def format_offer(self, slot: WatchSlot, offer: FlightOffer) -> str:
-        """Format one result-page message with exactly one user-facing URL."""
-        rows = list(offer.display_offers or [])[: self.settings.alert_max_offers]
+        """Format one result-page message with exactly one user-facing URL.
+
+        Google can expose the same physical row through both an aria-label and
+        visible text with tiny whitespace differences. De-duplicate those
+        semantically before applying the configured display limit so the daily
+        Cheapest window never wastes a slot on the same flight twice.
+        """
+        raw_rows = list(offer.display_offers or [])
+        rows: list[dict] = []
+        seen_rows: set[tuple] = set()
+        for row in raw_rows:
+            try:
+                price = int(row.get("price"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            airline = re.sub(r"\s+", " ", str(row.get("airline") or "").strip()).lower()
+            times_value = row.get("times") or []
+            times = tuple(
+                re.sub(r"\s+", " ", str(value).strip()).lower()
+                for value in times_value
+            ) if isinstance(times_value, list) else ()
+            flight_numbers = re.sub(
+                r"\s+", "", str(row.get("flight_numbers") or "").upper()
+            )
+            key = (price, airline, times, flight_numbers)
+            if key in seen_rows:
+                continue
+            seen_rows.add(key)
+            rows.append(row)
+            if len(rows) >= self.settings.alert_max_offers:
+                break
+
         if not rows:
             rows = [
                 {
@@ -196,9 +226,6 @@ class FlightService:
         )
         target_alert_sent = False
 
-        # One-shot target alert. Once ALERTED, price movement alone never re-arms
-        # the slot. Only an explicit /flight target change (or delete/re-add)
-        # creates a new one-shot target-alert opportunity.
         if (
             below_target
             and notify_target
@@ -238,9 +265,6 @@ class FlightService:
                     + "\n알림은 전송됐지만 상태 저장을 확인하지 못했습니다. 중복 방지를 위해 SENDING 상태를 유지합니다."
                 )
 
-        # The regular once-daily message always shows the current Cheapest/direct
-        # result window, regardless of target price. If the one-shot target alert
-        # fired in this exact scan, skip the summary to avoid duplicate messages.
         if notify_daily_summary and self.notifier and not target_alert_sent:
             try:
                 await self.notifier.send(
