@@ -9,7 +9,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from naver_flight_probe import (
+from naver_flight_probe_runtime import (
     DEFAULT_DEPART,
     DEFAULT_DESTINATION,
     DEFAULT_ORIGIN,
