@@ -48,7 +48,7 @@ Skyscanner:
 flight-bot - test win\03-SKYSCANNER-flight-test.bat
 ```
 
-최초 실행이라 `.venv-win`이 없으면 각 BAT가 준비 작업을 자동 실행합니다. `01`을 먼저 실행할 필요는 없습니다.
+최초 실행이라 `.venv-provider-poc`이 없으면 각 BAT가 **POC 전용 환경을 자동 생성**합니다. 기존 운영용 `.venv-win`과 섞지 않습니다. `01`을 먼저 실행할 필요는 없습니다.
 
 수동 준비가 필요할 때만:
 
