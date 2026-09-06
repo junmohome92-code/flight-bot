@@ -87,6 +87,7 @@ jobs:
           tests/test_google_price_unavailable_recovery.py
           tests/test_google_return_phase_boundary.py
           tests/test_runtime_results_provider.py
+          tests/test_google_query.py
 
   docker-smoke:
     runs-on: ubuntu-latest
@@ -99,6 +100,10 @@ jobs:
           ADMIN_SECRET=ci-secret docker compose config >/tmp/compose-rendered.yaml
           grep -q 'DATABASE_PATH: /data/flight_bot.db' /tmp/compose-rendered.yaml
           grep -q 'BROWSER_HEADLESS: "true"' /tmp/compose-rendered.yaml || grep -q 'BROWSER_HEADLESS: true' /tmp/compose-rendered.yaml
+          grep -q 'BROWSER_BLOCK_ASSETS: "false"' /tmp/compose-rendered.yaml || grep -q 'BROWSER_BLOCK_ASSETS: false' /tmp/compose-rendered.yaml
+          grep -q 'BROWSER_TIMEOUT_MS: "60000"' /tmp/compose-rendered.yaml || grep -q 'BROWSER_TIMEOUT_MS: 60000' /tmp/compose-rendered.yaml
+          grep -q 'SEARCH_CONCURRENCY: "2"' /tmp/compose-rendered.yaml || grep -q 'SEARCH_CONCURRENCY: 2' /tmp/compose-rendered.yaml
+          grep -q 'SLOT_ACTIVE_LIMIT: "10"' /tmp/compose-rendered.yaml || grep -q 'SLOT_ACTIVE_LIMIT: 10' /tmp/compose-rendered.yaml
           grep -q 'BROWSER_DEBUG_DIR: /debug' /tmp/compose-rendered.yaml
       - name: Build production image
         run: docker build -t flight-bot-ci .
@@ -118,16 +123,20 @@ jobs:
 
           base = 'http://127.0.0.1:18080'
           last = None
-          for _ in range(40):
+          for _ in range(50):
               try:
                   with urllib.request.urlopen(base + '/health', timeout=2) as response:
                       payload = json.load(response)
                   assert payload['ok'] is True
                   assert payload['provider'] == 'google-playwright-results-observed-accepted-flow'
                   assert payload['provider_accepted_for_alerts'] is True
+                  assert payload['google_query_contract'] == 'accepted-tfs-v1'
                   assert payload['search_interval_hours'] == 2
+                  assert payload['search_concurrency'] == 2
+                  assert payload['search_stagger_seconds'] == 5
                   assert payload['daily_summary_hour'] == 8
                   assert payload['browser_search_storage_isolated'] is True
+                  assert payload['browser_block_assets'] is False
                   assert payload['cheapest_selected_full_reload'] is True
                   assert payload['price_unavailable_recovery_reloads'] == 2
                   assert payload['slots_max'] == 10
