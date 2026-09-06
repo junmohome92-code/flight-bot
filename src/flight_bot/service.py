@@ -21,7 +21,7 @@ HELP = """항공권 감시봇 명령어
 /flight delete 1
 /help
 
-현재 사용 가능한 감시 슬롯은 5개이며 구조상 최대 10개까지 확장 가능합니다.
+감시 슬롯은 1~10번까지 총 10개를 사용할 수 있습니다.
 pause 상태도 슬롯을 차지합니다.
 가격 검색은 2시간 주기이며 각 검색은 새 브라우저 저장공간으로 격리합니다.
 알림 후보는 Google Flights 왕복 검색의 직항만 사용하며 경유편은 제외합니다.
@@ -277,7 +277,18 @@ class FlightService:
 
         return self.format_offer(slot, offer)
 
-    async def check_all(self, *, notify_daily_summary: bool = False) -> bool:
+    async def check_all(
+        self,
+        *,
+        notify_target: bool = True,
+        notify_daily_summary: bool = False,
+    ) -> bool:
+        """Scan every enabled slot.
+
+        Scheduled operation keeps ``notify_target=True``. Admin/manual tests may
+        disable target alerts while forcing the daily summary so a user can
+        verify the regular message without consuming the one-shot target latch.
+        """
         if self._scan_active:
             return False
         self._scan_active = True
@@ -285,7 +296,7 @@ class FlightService:
             for slot in self.db.list_slots(enabled_only=True):
                 await self.check_slot(
                     slot.id,
-                    notify_target=True,
+                    notify_target=notify_target,
                     notify_daily_summary=notify_daily_summary,
                 )
             return True
