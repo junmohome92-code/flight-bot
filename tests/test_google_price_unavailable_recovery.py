@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
+from pathlib import Path
 
 import pytest
 from playwright.async_api import async_playwright
 
-from scripts.google_booking_pointer_probe_v7 import (
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+sys.path.insert(0, str(_SCRIPTS_DIR))
+from google_booking_pointer_probe_v7 import (  # noqa: E402
     ensure_search_price_ready,
     is_target_closed_error,
     reopen_search_page,
