@@ -47,28 +47,28 @@ $VenvPython = Join-Path $VenvPath 'Scripts\python.exe'
 
 if (-not (Test-Path $VenvPython)) {
     if (Test-Path $VenvPath) {
-        Write-Host '[3/5] Removing incomplete .venv-provider-poc ...'
+        Write-Host '[3/5] Removing incomplete test environment ...'
         Remove-Item -Recurse -Force $VenvPath
     }
-    Write-Host '[3/5] Creating isolated .venv-provider-poc ...'
+    Write-Host '[3/5] Creating isolated Windows test environment ...'
     & $PythonLauncher @PythonArgs -m venv $VenvPath
     Assert-LastExitCode 'Virtual environment creation'
     if (-not (Test-Path $VenvPython)) {
         throw "Virtual environment creation did not produce $VenvPython"
     }
 } else {
-    Write-Host '[3/5] Reusing isolated .venv-provider-poc'
+    Write-Host '[3/5] Reusing isolated Windows test environment'
 }
 
-Write-Host '[4/5] Installing Naver SSE POC test dependency ...'
+Write-Host '[4/5] Installing Naver SSE test dependency ...'
 & $VenvPython -m pip install --upgrade pip
 Assert-LastExitCode 'pip upgrade'
-& $VenvPython -m pip install -r 'provider-poc-requirements.txt'
-Assert-LastExitCode 'Naver POC dependency installation'
+& $VenvPython -m pip install -r 'windows-test-requirements.txt'
+Assert-LastExitCode 'Windows test dependency installation'
 
-Write-Host '[5/5] Running Naver/Telegram E2E contract tests ...'
+Write-Host '[5/5] Running Naver SSE/Telegram contract tests ...'
 & $VenvPython -m pytest -q tests/test_provider_poc.py tests/test_windows_test_harness.py
-Assert-LastExitCode 'Naver/Telegram E2E contract tests'
+Assert-LastExitCode 'Naver SSE/Telegram contract tests'
 
 Write-Host ''
 Write-Host 'Windows Naver SSE test setup complete.'
