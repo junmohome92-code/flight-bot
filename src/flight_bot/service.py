@@ -5,7 +5,7 @@ import inspect
 import re
 from datetime import date
 
-from .config import Settings
+from .config import SLOT_DESIGN_CAPACITY, Settings
 from .db import Database, StaleSlotError
 from .models import ALERT_ARMED, ALERT_SENDING, ALERTED, FlightOffer, WatchSlot
 from .providers import GoogleFlightsPlaywrightProvider, ProviderError
@@ -21,9 +21,12 @@ HELP = """항공권 감시봇 명령어
 /flight delete 1
 /help
 
-저장 슬롯은 1/2/3 정확히 3개입니다. pause 상태도 슬롯을 차지합니다.
+현재 사용 가능한 감시 슬롯은 5개이며 구조상 최대 10개까지 확장 가능합니다.
+pause 상태도 슬롯을 차지합니다.
+가격 검색은 2시간 주기이며 각 검색은 새 브라우저 저장공간으로 격리합니다.
 알림 후보는 Google Flights 왕복 검색의 직항만 사용하며 경유편은 제외합니다.
-목표가 이하로 새로 진입했을 때만 한 번 알리고, 가격이 다시 목표가 위로 올라가면 재무장됩니다.
+목표가 도달 알림은 목표가 설정당 최초 1회만 전송합니다.
+그 이후에는 하루 1회 정기 가격 알림에서 최신 직항 최저가 창을 보여줍니다.
 """
 
 _AIRPORT_RE = re.compile(r"^[A-Z]{3}$")
@@ -35,12 +38,7 @@ class FlightService:
         self.db = db
         self.provider = provider or GoogleFlightsPlaywrightProvider(settings)
         self.notifier = None
-        # One coordinator lock covers the whole slot transaction *and* slot
-        # mutations. A search can therefore never finish into a deleted/reused
-        # slot in this process.
         self._operation_lock = asyncio.Lock()
-        # This boolean is set before the first await in check_all(), making the
-        # duplicate-scan claim atomic within one asyncio event loop.
         self._scan_active = False
 
     def set_notifier(self, notifier) -> None:
@@ -60,7 +58,7 @@ class FlightService:
         )
 
     def format_offer(self, slot: WatchSlot, offer: FlightOffer) -> str:
-        """Format one result-page alert with exactly one user-facing URL."""
+        """Format one result-page message with exactly one user-facing URL."""
         rows = list(offer.display_offers or [])[: self.settings.alert_max_offers]
         if not rows:
             rows = [
@@ -130,11 +128,27 @@ class FlightService:
         if inspect.isawaitable(result):
             await result
 
-    async def check_slot(self, slot_id: int, *, notify_target: bool = False) -> str:
+    async def check_slot(
+        self,
+        slot_id: int,
+        *,
+        notify_target: bool = False,
+        notify_daily_summary: bool = False,
+    ) -> str:
         async with self._operation_lock:
-            return await self._check_slot_locked(slot_id, notify_target=notify_target)
+            return await self._check_slot_locked(
+                slot_id,
+                notify_target=notify_target,
+                notify_daily_summary=notify_daily_summary,
+            )
 
-    async def _check_slot_locked(self, slot_id: int, *, notify_target: bool) -> str:
+    async def _check_slot_locked(
+        self,
+        slot_id: int,
+        *,
+        notify_target: bool,
+        notify_daily_summary: bool = False,
+    ) -> str:
         slot = self.db.get_slot(slot_id)
         if not slot:
             return f"슬롯 #{slot_id}을 찾을 수 없습니다."
@@ -171,63 +185,85 @@ class FlightService:
             )[:500],
         )
 
-        effective_price = offer.verified_price if offer.price_verified and offer.verified_price is not None else offer.observed_price
+        effective_price = (
+            offer.verified_price
+            if offer.price_verified and offer.verified_price is not None
+            else offer.observed_price
+        )
         below_target = effective_price <= slot.target_price
         alert_eligible = provider_alert_capable and (
             offer.price_verified or not self.settings.require_verified_alerts
         )
+        target_alert_sent = False
 
-        if below_target:
-            if (
-                notify_target
-                and slot.alert_state == ALERT_ARMED
-                and alert_eligible
-                and self.notifier
-            ):
-                # Mark SENDING before the external side effect. If the process
-                # dies after delivery but before the DB finalization, restart
-                # will not resend the same below-target interval. This is an
-                # intentional at-most-once crash policy.
+        # One-shot target alert. Once ALERTED, price movement alone never re-arms
+        # the slot. Only an explicit /flight target change (or delete/re-add)
+        # creates a new one-shot target-alert opportunity.
+        if (
+            below_target
+            and notify_target
+            and slot.alert_state == ALERT_ARMED
+            and alert_eligible
+            and self.notifier
+        ):
+            try:
+                self.db.set_alert_state(slot.id, ALERT_SENDING, alerted_price=effective_price)
+                pending_slot = self.db.get_slot(slot.id) or slot
+                alert_id = self.db.begin_alert(pending_slot, offer)
+            except Exception as exc:
                 try:
-                    self.db.set_alert_state(slot.id, ALERT_SENDING, alerted_price=effective_price)
-                    pending_slot = self.db.get_slot(slot.id) or slot
-                    alert_id = self.db.begin_alert(pending_slot, offer)
-                except Exception as exc:
-                    try:
-                        self.db.set_alert_state(slot.id, ALERT_ARMED)
-                    except Exception:
-                        pass
-                    return self.format_offer(slot, offer) + f"\n알림 준비 실패: {type(exc).__name__}"
-
-                try:
-                    await self.notifier.send(
-                        slot.owner_platform,
-                        slot.owner_id,
-                        "🔥 목표가 도달\n" + self.format_offer(slot, offer),
-                    )
-                except Exception as exc:
-                    self.db.finish_alert(alert_id, state="FAILED", error=f"{type(exc).__name__}: {exc}"[:500])
                     self.db.set_alert_state(slot.id, ALERT_ARMED)
-                    return self.format_offer(slot, offer) + f"\n알림 전송 실패: {type(exc).__name__}"
-
-                try:
-                    self.db.finish_alert(alert_id, state="SENT")
-                    self.db.set_alert_state(slot.id, ALERTED, alerted_price=effective_price)
                 except Exception:
-                    # Do not re-arm after the external send succeeded. Leaving
-                    # SENDING is safer than risking a duplicate after restart.
-                    return self.format_offer(slot, offer) + "\n알림은 전송됐지만 상태 저장을 확인하지 못했습니다. 중복 방지를 위해 SENDING 상태를 유지합니다."
-        elif slot.alert_state in {ALERTED, ALERT_SENDING}:
-            self.db.set_alert_state(slot.id, ALERT_ARMED)
+                    pass
+                return self.format_offer(slot, offer) + f"\n알림 준비 실패: {type(exc).__name__}"
+
+            try:
+                await self.notifier.send(
+                    slot.owner_platform,
+                    slot.owner_id,
+                    "🔥 목표가 도달\n" + self.format_offer(slot, offer),
+                )
+            except Exception as exc:
+                self.db.finish_alert(alert_id, state="FAILED", error=f"{type(exc).__name__}: {exc}"[:500])
+                self.db.set_alert_state(slot.id, ALERT_ARMED)
+                return self.format_offer(slot, offer) + f"\n알림 전송 실패: {type(exc).__name__}"
+
+            try:
+                self.db.finish_alert(alert_id, state="SENT")
+                self.db.set_alert_state(slot.id, ALERTED, alerted_price=effective_price)
+                target_alert_sent = True
+            except Exception:
+                return (
+                    self.format_offer(slot, offer)
+                    + "\n알림은 전송됐지만 상태 저장을 확인하지 못했습니다. 중복 방지를 위해 SENDING 상태를 유지합니다."
+                )
+
+        # The regular once-daily message always shows the current Cheapest/direct
+        # result window, regardless of target price. If the one-shot target alert
+        # fired in this exact scan, skip the summary to avoid duplicate messages.
+        if notify_daily_summary and self.notifier and not target_alert_sent:
+            try:
+                await self.notifier.send(
+                    slot.owner_platform,
+                    slot.owner_id,
+                    "📊 정기 가격 알림\n" + self.format_offer(slot, offer),
+                )
+            except Exception as exc:
+                return self.format_offer(slot, offer) + f"\n정기 알림 전송 실패: {type(exc).__name__}"
+
         return self.format_offer(slot, offer)
 
-    async def check_all(self) -> bool:
+    async def check_all(self, *, notify_daily_summary: bool = False) -> bool:
         if self._scan_active:
             return False
         self._scan_active = True
         try:
             for slot in self.db.list_slots(enabled_only=True):
-                await self.check_slot(slot.id, notify_target=True)
+                await self.check_slot(
+                    slot.id,
+                    notify_target=True,
+                    notify_daily_summary=notify_daily_summary,
+                )
             return True
         finally:
             self._scan_active = False
@@ -297,7 +333,7 @@ class FlightService:
                     self.db.set_target(slot_id, price)
                 except ValueError as exc:
                     return str(exc)
-            return f"슬롯 #{slot_id} 목표가를 {price:,}KRW로 변경하고 알림을 재무장했습니다."
+            return f"슬롯 #{slot_id} 목표가를 {price:,}KRW로 변경했습니다. 목표가 도달 알림 1회를 다시 활성화했습니다."
 
         if action in {"check", "pause", "resume", "delete"}:
             if len(parts) < 3 or not parts[2].isdigit():
@@ -308,7 +344,11 @@ class FlightService:
                     slot = self.db.get_owned_slot(slot_id, platform, owner_id)
                     if not slot:
                         return f"슬롯 #{slot_id}을 찾을 수 없거나 이 대화에서 만든 슬롯이 아닙니다."
-                    return await self._check_slot_locked(slot_id, notify_target=False)
+                    return await self._check_slot_locked(
+                        slot_id,
+                        notify_target=False,
+                        notify_daily_summary=False,
+                    )
 
             async with self._operation_lock:
                 slot = self.db.get_owned_slot(slot_id, platform, owner_id)
