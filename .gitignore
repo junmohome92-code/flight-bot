@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example
+flight-bot - test win/telegram-test.env
 credentials*.json
 secrets*.json
 *.pem
