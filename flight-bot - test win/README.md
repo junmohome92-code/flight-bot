@@ -12,13 +12,15 @@ Windows 10/11에서 현재 `flight-bot` 소스의 Google Flights 실가격 경�
 01-setup-and-unit-test.cmd
 ```
 
-`.venv-win`이 이미 있고 최신 ZIP으로 코드만 바꿨다면:
+**2026-09-06 hardening에서 `constraints.txt`와 dependency/CI 구성이 바뀌었으므로, 그 이전 ZIP/가상환경에서 넘어오는 경우 이번 한 번은 반드시 `01`을 먼저 실행합니다.**
+
+그 다음 live 검증:
 
 ```text
 02-live-cjj-tpe-visible.cmd
 ```
 
-만 실행하면 됩니다. 현재 acceptance는 **visible native Edge 전용**입니다. 예전 headless launcher는 실제 active probe와 모순되어 제거했습니다.
+이후 dependency 변경이 없고 `.venv-win`이 유지되면 `02`만 실행하면 됩니다. 현재 acceptance는 **visible native Edge 전용**입니다. 예전 headless launcher는 실제 active probe와 모순되어 제거했습니다.
 
 ## acceptance 조건
 
@@ -51,6 +53,12 @@ scripts/google_dom_capture.js
 src/flight_bot/google_ui_contract.py
 ```
 
+브라우저 lifecycle 회귀 테스트:
+
+```text
+tests/test_google_browser_contract.py
+```
+
 흐름:
 
 ```text
@@ -60,6 +68,7 @@ src/flight_bot/google_ui_contract.py
 → Cheapest/최저가를 실제 클릭
 → aria-selected/pressed 확인
 → characterData(Text node) 포함 transient 가격 변화 snapshot
+→ inline descendant text-node를 semantic spacing으로 합침
 → Cheapest 표시가 + 실제 row 최저가가 둘 다 안정될 때까지 대기
 → 비싼 임시 row fallback 금지
 → 선택 row 좌표가 아직 같은 flight card인지 재검증
@@ -134,6 +143,21 @@ acceptance=GOOGLE_BOOKING_OPTION_REACHED_WITH_NAVIGATION_SAFE_CAPTURE
 ```
 
 Google Booking option은 외부 판매처 checkout final total이 아니므로 여기까지 성공해도 `verified=False`가 정상입니다.
+
+## GitHub에서 검증된 browser lifecycle
+
+실사이트 가격 acceptance와 별개로 GitHub CI의 실제 Chromium에서는 다음을 재현해 통과했습니다.
+
+```text
+Cheapest/row text-node 418,500 → 311,811 mutation
+→ 311,811 transient departure capture
+→ full document navigation
+→ returning phase 자동 복원
+→ Returning flights marker
+→ +₩0 return row capture
+```
+
+이 검증은 Google hosted 실가격을 뜻하지 않습니다. 실제 가격은 이 Windows visible Edge run으로 확인해야 합니다.
 
 ## 실패 artifact
 
