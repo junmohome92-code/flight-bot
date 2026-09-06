@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+import flight_bot.providers as providers_module
 from flight_bot.config import Settings
 from flight_bot.models import WatchSlot
 from flight_bot.runtime_results_provider import RuntimeGoogleResultsProvider
@@ -40,29 +41,16 @@ class _FakeBrowserSession:
 
 
 class _TraceProvider(RuntimeGoogleResultsProvider):
-    def __init__(self, settings, trace):
+    def __init__(self, settings, trace, *, query_builder=None):
         self.trace = trace
         super().__init__(
             settings,
-            query_builder=lambda slot: "https://www.google.com/travel/flights/search?runtime-test=1",
+            query_builder=query_builder,
             browser_session=_FakeBrowserSession(trace),
         )
 
     async def _check_captcha(self, page):
         self.trace.append("captcha-check")
-
-    async def _ensure_cheapest_selected(self, page):
-        count = sum(1 for item in self.trace if item == "ensure-cheapest")
-        self.trace.append("ensure-cheapest")
-        return count == 0
-
-    async def _reload_or_reopen(self, page, search_url):
-        self.trace.append("forced-full-reload")
-        return page
-
-    async def _ensure_price_ready(self, page, search_url):
-        self.trace.append("price-ready-with-recovery")
-        return page, 2
 
     async def _extract_best(self, page, slot):
         self.trace.append("extract-direct")
@@ -105,38 +93,45 @@ def _slot():
 
 
 @pytest.mark.asyncio
-async def test_runtime_search_uses_accepted_cheapest_refresh_order():
+async def test_runtime_search_delegates_to_shared_accepted_flow(monkeypatch):
     trace = []
-    provider = _TraceProvider(Settings(_env_file=None), trace)
+
+    async def fake_prepare(page, search_url, **kwargs):
+        trace.append("canonical-prepare")
+        assert kwargs["selection_wait_ms"] == 25000
+        assert kwargs["ready_wait_ms"] == 8000
+        assert kwargs["recovery_reloads"] == 2
+        return page, 2
+
+    monkeypatch.setattr(providers_module, "prepare_cheapest_surface", fake_prepare)
+    provider = _TraceProvider(
+        Settings(_env_file=None),
+        trace,
+        query_builder=lambda slot: "https://www.google.com/travel/flights/search?runtime-test=1",
+    )
 
     offer = await provider.search(_slot())
 
     assert offer.total_price == 308545
     assert offer.result_url.endswith("runtime-test=1")
+    assert offer.raw["query_contract"] == "accepted-tfs-v1"
     assert offer.raw["cheapest_selected_full_reload"] == 1
     assert offer.raw["price_recovery_reload_count"] == 2
-
-    important = [
-        item
-        for item in trace
-        if item in {
-            "goto",
-            "ensure-cheapest",
-            "forced-full-reload",
-            "price-ready-with-recovery",
-            "extract-direct",
-            "release-page",
-        }
-    ]
-    assert important == [
+    assert [item for item in trace if item in {"goto", "canonical-prepare", "extract-direct", "release-page"}] == [
         "goto",
-        "ensure-cheapest",
-        "forced-full-reload",
-        "price-ready-with-recovery",
-        "ensure-cheapest",
+        "canonical-prepare",
         "extract-direct",
         "release-page",
     ]
+
+
+def test_runtime_default_url_matches_accepted_probe_contract():
+    provider = RuntimeGoogleResultsProvider(Settings(_env_file=None), browser_session=_FakeBrowserSession([]))
+    assert provider.build_search_url(_slot()) == (
+        "https://www.google.com/travel/flights/search?"
+        "tfs=CBwQAhoeEgoyMDI2LTA5LTE4agcIARIDQ0pKcgcIARIDVFBFGh4SCjIwMjYtMDktMjBqBwgBEgNUUEVyBwgBEgNDSkpAAUgBcAGCAQsI____________AZgBAQ"
+        "&hl=en&gl=kr&curr=KRW"
+    )
 
 
 def test_runtime_provider_exposes_accepted_flow_identity():
