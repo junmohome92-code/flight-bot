@@ -6,6 +6,7 @@ from typing import Any
 
 
 ALERT_ARMED = "ARMED"
+ALERT_SENDING = "SENDING"
 ALERTED = "ALERTED"
 
 
@@ -30,6 +31,8 @@ class WatchSlot:
     last_alerted_price: int | None = None
     last_alerted_at: str | None = None
     currency: str = "KRW"
+    generation: str = ""
+    revision: int = 1
 
 
 @dataclass(slots=True)
@@ -53,14 +56,16 @@ class FlightOffer:
     nonstop: bool | None = None
     raw: dict[str, Any] | None = None
     fetched_at: datetime | None = None
+    observed_price_value: int | None = None
+    booking_option_price: int | None = None
+    verified_checkout_price: int | None = None
+    verification_status: str = "unverified"
 
     @property
     def observed_price(self) -> int:
-        """Price actually observed in the provider UI/result row.
-
-        A verified checkout may legitimately differ from the earlier observed
-        row. Providers should preserve the row value in raw['observed_price'].
-        """
+        """Price actually observed in the provider flight row."""
+        if self.observed_price_value is not None:
+            return int(self.observed_price_value)
         raw_value = (self.raw or {}).get("observed_price")
         try:
             return int(raw_value) if raw_value is not None else int(self.total_price)
@@ -69,5 +74,9 @@ class FlightOffer:
 
     @property
     def verified_price(self) -> int | None:
-        """Final verified price, or None when verification has not crossed the contract boundary."""
-        return int(self.total_price) if self.price_verified else None
+        """External seller checkout final total, if verification completed."""
+        if not self.price_verified:
+            return None
+        if self.verified_checkout_price is not None:
+            return int(self.verified_checkout_price)
+        return int(self.total_price)
