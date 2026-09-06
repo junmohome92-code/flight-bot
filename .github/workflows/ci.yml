@@ -34,7 +34,7 @@ jobs:
       - name: Parse Windows notification test menu
         shell: pwsh
         run: |
-          $path = 'flight-bot - test win/notification-test-menu.ps1'
+          $path = 'flight-bot - test win/notification-test-menu-v2.ps1'
           $tokens = $null
           $errors = $null
           [System.Management.Automation.Language.Parser]::ParseFile(
@@ -71,6 +71,7 @@ jobs:
           tests/test_google_departure_transition.py
           tests/test_google_price_unavailable_recovery.py
           tests/test_google_return_phase_boundary.py
+          tests/test_runtime_results_provider.py
 
   docker-smoke:
     runs-on: ubuntu-latest
@@ -99,10 +100,13 @@ jobs:
                   with urllib.request.urlopen(base + '/health', timeout=2) as response:
                       payload = json.load(response)
                   assert payload['ok'] is True
+                  assert payload['provider'] == 'google-playwright-results-observed-accepted-flow'
                   assert payload['provider_accepted_for_alerts'] is True
                   assert payload['search_interval_hours'] == 2
                   assert payload['daily_summary_hour'] == 8
                   assert payload['browser_search_storage_isolated'] is True
+                  assert payload['cheapest_selected_full_reload'] is True
+                  assert payload['price_unavailable_recovery_reloads'] == 2
                   assert payload['slots_max'] == 10
                   assert payload['slots_design_capacity'] == 10
                   assert payload['admin_endpoint_enabled'] is True
