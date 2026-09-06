@@ -120,6 +120,82 @@ BROWSER_DEBUG_DIR=/debug
 
 따라서 Windows 테스트용 `.env` 값을 그대로 들고 Docker로 가도 host 경로나 headed-browser 설정이 컨테이너를 깨뜨리지 않습니다.
 
+## 4. Google + Microsoft Edge 원인분리 테스트
+
+```text
+04-test-google-msedge.cmd
+```
+
+이 테스트는 설치된 **Microsoft Edge Stable**을 Playwright `msedge` 채널로 실행합니다.
+
+중요한 점은 브라우저만 Edge로 바꾸고 아래는 production과 동일하게 사용한다는 것입니다.
+
+```text
+accepted-tfs-v1 URL
+RuntimeGoogleResultsProvider.search()
+Cheapest 선택
+강제 full reload 1회
+Price unavailable recovery 최대 2회
+직항 row-scoped 가격 추출
+```
+
+따라서 `02`는 성공하고 `03`은 실패하던 상황에서 `04`가 성공하면 bundled Chromium과 Edge의 차이를 강하게 의심할 수 있습니다.
+
+결과/실패 자료:
+
+```text
+artifacts/google-msedge-win/
+```
+
+## 5. 네이버 항공권 대안 가능성 테스트
+
+```text
+05-test-naver-flights.cmd
+```
+
+고정 테스트 조건:
+
+```text
+청주(CJJ) → 타이베이(TPE)
+2026-09-18 ~ 2026-09-20
+성인 1명 / 일반석
+직항만: isDirect=true
+브라우저: Microsoft Edge
+```
+
+네이버 결과 페이지까지만 들어가고 **항공편/운임/예약/결제 카드를 클릭하지 않습니다.**
+
+테스트가 확인하는 것:
+
+```text
+네이버 결과 페이지가 정상 로딩되는지
+원화 가격이 노출되는지
+페이지 전체 최소가가 아니라 compact row context에서 가격을 잡을 수 있는지
+XHR/fetch URL을 기록해 향후 안정적인 Provider 구현 가능성을 판단할 수 있는지
+```
+
+결과/스크린샷/페이지 텍스트/네트워크 기록:
+
+```text
+artifacts/naver-flights-win/
+```
+
+## 비교 테스트 권장 순서
+
+```text
+01-setup-and-unit-test.cmd
+↓
+02-live-cjj-tpe-visible.cmd        기존 native Edge 기준점
+↓
+04-test-google-msedge.cmd          Playwright + Edge
+↓
+05-test-naver-flights.cmd          Naver 대안 POC
+↓
+03-notification-test-menu.cmd      최종 Telegram E2E는 Provider 방향 결정 후
+```
+
+`04`, `05`는 `.env`나 Telegram 설정이 없어도 실행 가능합니다.
+
 ## 가장 쉬운 목표가 알림 테스트
 
 LOCAL 모드로 봇을 띄운 뒤 Telegram에서:
@@ -218,8 +294,10 @@ docker compose logs --tail 200 flight-bot
 
 ```text
 01-setup-and-unit-test.cmd      설치 + 전체 단위테스트
-02-live-cjj-tpe-visible.cmd     Google Flights visible acceptance
+02-live-cjj-tpe-visible.cmd     Google Flights native Edge acceptance
 03-notification-test-menu.cmd   실제 Telegram 알림 E2E 테스트
+04-test-google-msedge.cmd       Google production Provider + Playwright msedge
+05-test-naver-flights.cmd       Naver Flights direct-results viability POC
 notification-test-menu.ps1      03의 canonical PowerShell 스크립트 (ASCII-only)
 ```
 
