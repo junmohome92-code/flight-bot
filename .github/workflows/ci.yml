@@ -37,6 +37,23 @@ jobs:
           ! grep -RniE 'chromium|msedge|browser_headless|browser_profile|browser_debug' src Dockerfile pyproject.toml compose.yaml .env.example
       - name: Build lightweight Docker image
         run: docker build --pull -t flight-bot:ci .
+      - name: Start Docker runtime and verify health
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name flight-bot-ci -p 127.0.0.1:18080:8080 flight-bot:ci
+          trap 'docker logs flight-bot-ci || true; docker rm -f flight-bot-ci >/dev/null 2>&1 || true' EXIT
+          for i in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:18080/health > /tmp/health.json; then
+              cat /tmp/health.json
+              grep -q '"provider":"naver-flights-sse"' /tmp/health.json
+              grep -q '"browser_required":false' /tmp/health.json
+              exit 0
+            fi
+            sleep 1
+          done
+          echo 'container health endpoint did not become ready' >&2
+          exit 1
 
   test-windows-harness:
     runs-on: windows-latest
