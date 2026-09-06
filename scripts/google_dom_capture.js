@@ -25,6 +25,9 @@
     returningMarkerAtMs: null,
     rejectedBroad: 0,
     rejectedSource: 0,
+    rejectedShape: 0,
+    rejectedRoute: 0,
+    rejectedPriceContext: 0,
     seq: 0,
     startedAtMs: performance.now()
   };
@@ -37,7 +40,12 @@
   const loadingRe = /fetching results|checking prices|searching nearby airports|checking online travel agencies|검색 중|불러오는 중|가격 확인 중/i;
   const returningRe = /returning flights|귀국 항공편/i;
   const semanticSelector = '[role="button"], [role="link"], button, a, [tabindex="0"]';
-  const broadMarkerRe = /flight search|search results|all filters|top departing flights|other departing flights|sorted by|checking prices from multiple sources|searching nearby airports|checking online travel agencies|finding the cheapest booking options/i;
+
+  // These markers identify page/list-level containers and stay hard rejects.
+  // "Top departing flights" / "Other departing flights" are intentionally not
+  // included here because Google's current DOM can place a section label inside
+  // the same compact wrapper as one real flight card.
+  const hardBroadMarkerRe = /flight search|search results|all filters|sorted by|checking prices from multiple sources|searching nearby airports|checking online travel agencies|finding the cheapest booking options/i;
 
   function normalize(text) {
     return (text || '')
@@ -155,28 +163,51 @@
     const forwardToken = state.phase === 'returning' ? `${destination}-${origin}` : `${origin}-${destination}`;
     const reverseToken = state.phase === 'returning' ? `${origin}-${destination}` : `${destination}-${origin}`;
     let node = source;
+
     for (let depth = 0; depth < 18 && node; depth += 1, node = node.parentElement) {
       // Google frequently lays out flight fields as adjacent inline spans. Using
       // innerText alone can concatenate values (for example PM1:10), so build a
       // semantic row string by joining descendant Text nodes with spaces.
       const text = semanticText(node);
       if (!text) continue;
-      if (text.length > 1800 || broadMarkerRe.test(text)) {
+      if (text.length > 1800 || hardBroadMarkerRe.test(text)) {
         state.rejectedBroad += 1;
         continue;
       }
+
       timeRe.lastIndex = 0;
       const times = text.match(timeRe) || [];
-      if (times.length < 2 || times.length > 4) continue;
-      if (!flightShapeRe.test(text)) continue;
+      if (times.length < 2 || times.length > 4) {
+        state.rejectedShape += 1;
+        continue;
+      }
+      if (!flightShapeRe.test(text)) {
+        state.rejectedShape += 1;
+        continue;
+      }
+
       const rowPrices = parsePrices(text);
-      if (!rowPrices.includes(price) || rowPrices.length > 3) continue;
+      if (!rowPrices.includes(price) || rowPrices.length > 3) {
+        state.rejectedPriceContext += 1;
+        continue;
+      }
 
       const forward = countToken(text, forwardToken);
       const reverse = countToken(text, reverseToken);
-      if (reverse > 0) continue;
-      if (state.phase !== 'returning' && forward !== 1) continue;
-      if (state.phase === 'returning' && !(forward === 1 || forward === 0)) continue;
+      if (reverse > 0 || forward > 1) {
+        state.rejectedRoute += 1;
+        continue;
+      }
+
+      // The fixed search page already supplies route context. Current Google
+      // cards do not consistently repeat CJJ-TPE/TPE-CJJ inside each row, so a
+      // missing forward token is allowed. If a route token is present it must
+      // be the expected direction and appear at most once. This is the same
+      // fail-closed rule already used for Returning cards.
+      if (!(forward === 0 || forward === 1)) {
+        state.rejectedRoute += 1;
+        continue;
+      }
 
       return {
         row: node,
