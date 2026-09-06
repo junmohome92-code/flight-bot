@@ -9,6 +9,8 @@
 ```text
 Google Flights 왕복 검색
 → Cheapest/최저가
+→ 강제 전체 새로고침 1회
+→ Price unavailable이면 추가 복구 새로고침 최대 2회
 → 직항(Nonstop) 행만 수집
 → 중복 제거
 → 가격순 정렬
@@ -25,19 +27,35 @@ OTA/여행사 링크 제공      NO
 외부 checkout 검증        NO
 ```
 
+## 단일 Google 검색 계약
+
+Windows의 `02-live-cjj-tpe-visible.cmd`, 실제 Telegram 알림, 2시간 스케줄러, Ubuntu/Docker가 모두 같은 검색 계약을 사용합니다.
+
+```text
+google_query_contract=accepted-tfs-v1
+```
+
+이 계약은 실제 Windows acceptance에서 가격이 정상 표시된 TFS 형식을 코드로 생성합니다. 예전처럼 runtime만 `fast-flights`가 다른 URL을 생성하지 않습니다. 직항 제한도 TFS URL을 변형해서 넣지 않고, 정상 왕복 결과 화면을 연 뒤 **실제 결과 행의 `Nonstop/직항` 표시로 필터링**합니다.
+
 ## 검색 / 알림 주기
 
 기본값:
 
 ```text
 SEARCH_INTERVAL_HOURS=2
+SEARCH_CONCURRENCY=2
+SEARCH_STAGGER_SECONDS=5
 DAILY_SUMMARY_HOUR=8
 ```
 
 - 가격 검색은 `00, 02, 04, ... 22시`처럼 2시간마다 수행합니다.
+- 슬롯은 10개지만 Google 검색은 **동시에 최대 2개**만 실행합니다.
+- 검색 시작은 기본 5초씩 분산하여 한 순간에 요청을 몰지 않습니다.
+- 각 검색은 독립적인 **새 BrowserContext**를 사용합니다.
+- 따라서 다른 슬롯/이전 2시간 검색의 cookie, HTTP cache, localStorage, IndexedDB, service worker 상태를 상속하지 않습니다.
 - 오전 08시 검색은 하루 1회 **정기 가격 알림**도 전송합니다.
 - 정기 알림 때문에 별도 Google 조회를 추가하지 않습니다.
-- 각 검색은 **새 BrowserContext**를 사용하여 이전 검색의 cookie/cache/localStorage/IndexedDB 등을 다음 검색에 넘기지 않습니다.
+- `SEARCH_CONCURRENCY`는 코드상 최대 2까지만 허용합니다.
 
 ## 목표가 알림
 
@@ -80,8 +98,6 @@ Google Flights 검색결과: <검색결과 URL>
 
 ## 슬롯
 
-기본값:
-
 ```text
 SLOT_ACTIVE_LIMIT=10
 ```
@@ -94,6 +110,7 @@ SLOT_ACTIVE_LIMIT=10
 - add마다 `generation` UUID 생성
 - 설정/상태 변경마다 `revision` 증가
 - 검색 저장 시 generation/revision 재검증
+- 같은 슬롯의 검색/수정은 직렬화되어 target/pause/delete와 검색 결과 저장이 충돌하지 않음
 
 DB/schema도 1~10 슬롯을 기본 지원하므로 기존 5슬롯 DB를 그대로 사용해도 별도 schema migration 없이 6~10번 슬롯을 추가할 수 있습니다.
 
@@ -141,22 +158,77 @@ flight-bot - test win\01-setup-and-unit-test.cmd
 flight-bot - test win\02-live-cjj-tpe-visible.cmd
 ```
 
+이 acceptance는 더 이상 별도의 하드코딩 TFS URL을 사용하지 않고 production `accepted-tfs-v1` query builder를 그대로 사용합니다.
+
 실제 Telegram 목표가/정기알림 테스트:
 
 ```text
 flight-bot - test win\03-notification-test-menu.cmd
 ```
 
-`03` 메뉴는 실행 중인 봇이 없으면 **Windows 로컬 실행 또는 Docker Compose 실행**을 선택할 수 있고, 다음을 즉시 테스트할 수 있습니다.
+`03` 메뉴는 Windows PowerShell 5.1에서도 UTF-8 JSON을 raw bytes로 읽어 명시적으로 UTF-8 decode합니다. 따라서 API 응답의 한국어가 `ì...` 형태로 깨지는 것을 방지합니다.
 
-```text
-슬롯 1개 목표가 알림
-슬롯 1개 정기알림
-전체 슬롯 일반 검색
-전체 슬롯 강제 정기알림
+## Ubuntu 홈서버 배포 — 추천
+
+서버에서 저장소 루트로 이동한 뒤 `.env`를 준비합니다.
+
+```bash
+cp .env.example .env
+nano .env
 ```
 
-정기알림 강제 테스트는 목표가 one-shot 상태를 소비하거나 재무장하지 않습니다.
+최소 설정:
+
+```text
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_ALLOWED_CHAT_IDS=...
+ADMIN_SECRET=긴_랜덤문자열
+```
+
+그 다음 한 번에:
+
+```bash
+bash deploy/ubuntu-deploy.sh
+```
+
+이 스크립트가 다음을 수행합니다.
+
+```text
+.env 사전검증
+→ docker / compose 확인
+→ compose config 검증
+→ production image build
+→ container up
+→ health 대기
+→ accepted-tfs-v1 확인
+→ 10슬롯 확인
+→ 2시간 주기 확인
+→ 최대 동시검색 2 확인
+→ BrowserContext 격리 확인
+→ Cheapest/recovery 정책 확인
+→ Telegram 연결 확인
+→ admin API 확인
+```
+
+그 뒤 Telegram에서 슬롯을 추가하고 실제 Ubuntu IP에서 Google 가격/알림까지 검증합니다.
+
+```text
+/flight add CJJ TPE 2026-09-18 2026-09-20 999999
+```
+
+Ubuntu에서:
+
+```bash
+bash deploy/ubuntu-live-check.sh 1 target
+```
+
+정기알림 강제 테스트:
+
+```bash
+bash deploy/ubuntu-live-check.sh 1 daily
+```
+
+상세: `deploy/README.md`
 
 ## 관리자 테스트 API
 
@@ -169,38 +241,13 @@ POST /admin/check-slot/{slot_id}
 POST /admin/daily-summary/{slot_id}
 ```
 
-의미:
-
-```text
-/admin/check-slot/1
-→ 슬롯 1 실제 Google 검색
-→ 목표가 조건을 만족하고 ARMED면 목표가 알림 1회
-
-/admin/daily-summary/1
-→ 슬롯 1 실제 Google 검색
-→ 정기알림 즉시 전송
-→ 목표가 latch는 건드리지 않음
-```
+`/admin/check-slot/1`은 실제 production Google 검색 후 목표가 one-shot 알림을 검사합니다. `/admin/daily-summary/1`은 실제 검색 후 정기알림만 강제로 보내며 목표가 latch는 건드리지 않습니다.
 
 모든 admin endpoint는 `X-Flight-Bot-Secret` 헤더가 필요합니다.
 
 ## Docker
 
-`.env` 준비:
-
-```bash
-cp .env.example .env
-```
-
-최소 Telegram 알림 테스트 설정:
-
-```text
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_ALLOWED_CHAT_IDS=...
-ADMIN_SECRET=긴_랜덤문자열
-```
-
-실행:
+일반 실행:
 
 ```bash
 docker compose up -d --build
@@ -218,23 +265,25 @@ http://127.0.0.1:8080
 docker compose down
 ```
 
-Health:
+SQLite는 named volume `/data`를 사용하므로 일반적인 image rebuild 및 `down/up`으로 데이터가 사라지지 않습니다.
+
+Health 핵심 필드:
 
 ```text
-GET /health
-```
-
-핵심 필드:
-
-```text
+provider=google-playwright-results-observed-accepted-flow
+google_query_contract=accepted-tfs-v1
 search_interval_hours=2
-daily_summary_hour=8
+search_concurrency=2
+search_stagger_seconds=5
 browser_search_storage_isolated=true
+browser_block_assets=false
+cheapest_selected_full_reload=true
+price_unavailable_recovery_reloads=2
 slots_max=10
 slots_design_capacity=10
 ```
 
-Docker image는 non-root `app` 사용자로 실행되고 `/data` SQLite volume을 사용합니다.
+Docker image는 non-root `app` 사용자로 실행됩니다.
 
 ## CI
 
@@ -247,4 +296,4 @@ browser-contract
 docker-smoke
 ```
 
-Docker smoke는 10슬롯 health 값과 admin 수동 테스트 route가 실제 production image에서 동작하는지까지 확인합니다.
+CI는 exact accepted TFS token, 최대 동시검색 2, 독립 BrowserContext, Windows PowerShell 5.1/7 parser, production Docker Compose 설정, runtime health/admin surface를 검증합니다.
