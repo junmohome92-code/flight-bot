@@ -60,11 +60,11 @@ if (-not (Test-Path $VenvPython)) {
     Write-Host '[3/6] Reusing isolated .venv-provider-poc'
 }
 
-Write-Host '[4/6] Installing only provider POC dependencies ...'
+Write-Host '[4/6] Installing only Naver provider POC dependencies ...'
 & $VenvPython -m pip install --upgrade pip
 Assert-LastExitCode 'pip upgrade'
 & $VenvPython -m pip install -r 'provider-poc-requirements.txt'
-Assert-LastExitCode 'provider POC dependency installation'
+Assert-LastExitCode 'Naver POC dependency installation'
 
 Write-Host '[5/6] Checking Microsoft Edge ...'
 $EdgeCandidates = @(
@@ -77,12 +77,12 @@ if (-not $EdgeCandidates) {
 }
 Write-Host ("[5/6] Edge found: " + $EdgeCandidates[0])
 
-Write-Host '[6/6] Running provider POC contract tests ...'
+Write-Host '[6/6] Running Naver/Telegram E2E contract tests ...'
 & $VenvPython -m pytest -q tests/test_provider_poc.py tests/test_windows_test_harness.py
-Assert-LastExitCode 'provider POC contract tests'
+Assert-LastExitCode 'Naver/Telegram E2E contract tests'
 
 Write-Host ''
-Write-Host 'Windows provider POC setup complete.'
-Write-Host 'You can now double-click either:'
+Write-Host 'Windows Naver test setup complete.'
+Write-Host 'Next:'
 Write-Host '  02-NAVER-flight-test.bat'
-Write-Host '  03-SKYSCANNER-flight-test.bat'
+Write-Host '  03-NAVER-TELEGRAM-E2E.bat'
