@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -26,9 +27,14 @@ def kakao_response(text: str) -> dict:
     return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": text[:1000]}}]}}
 
 
+def _secret_matches(expected: str, supplied: str | None) -> bool:
+    return bool(expected and supplied and secrets.compare_digest(expected, supplied))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global telegram_app, discord_client
+    settings.validate_runtime_security()
     for hour in settings.scheduled_hours:
         scheduler.add_job(
             service.check_all,
@@ -43,14 +49,17 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     telegram_app = await build_telegram(settings, service, notifier)
     discord_client = await start_discord(settings, service, notifier)
-    yield
-    scheduler.shutdown(wait=False)
-    if telegram_app:
-        await telegram_app.updater.stop()
-        await telegram_app.stop()
-        await telegram_app.shutdown()
-    if discord_client:
-        await discord_client.close()
+    try:
+        yield
+    finally:
+        scheduler.shutdown(wait=False)
+        if telegram_app:
+            await telegram_app.updater.stop()
+            await telegram_app.stop()
+            await telegram_app.shutdown()
+        if discord_client:
+            await discord_client.close()
+        await service.close()
 
 
 app = FastAPI(title="Flight Bot", version="0.2.0", lifespan=lifespan)
@@ -58,15 +67,18 @@ app = FastAPI(title="Flight Bot", version="0.2.0", lifespan=lifespan)
 
 @app.get("/health")
 async def health():
+    discord_ready = bool(notifier.discord_client and notifier.discord_client.is_ready())
     return {
         "ok": True,
         "provider": service.provider.name,
         "provider_accepted_for_alerts": bool(getattr(service.provider, "accepted_for_alerts", True)),
         "require_verified_alerts": settings.require_verified_alerts,
         "browser_headless": settings.browser_headless,
-        "telegram": bool(settings.telegram_bot_token),
-        "discord": bool(settings.discord_bot_token),
-        "kakao_skill": True,
+        "telegram_connected": notifier.telegram_app is not None,
+        "discord_connected": discord_ready,
+        "kakao_skill_enabled": bool(settings.kakao_skill_secret),
+        "admin_endpoint_enabled": bool(settings.admin_secret),
+        "scan_active": service.scan_active,
         "slots_used": len(db.list_slots()),
         "slots_max": 3,
     }
@@ -74,29 +86,34 @@ async def health():
 
 @app.post("/kakao/skill")
 async def kakao_skill(request: Request, x_flight_bot_secret: str | None = Header(default=None)):
-    if settings.kakao_skill_secret and x_flight_bot_secret != settings.kakao_skill_secret:
+    if not settings.kakao_skill_secret:
+        raise HTTPException(status_code=404, detail="Kakao skill is disabled")
+    if not _secret_matches(settings.kakao_skill_secret, x_flight_bot_secret):
         raise HTTPException(status_code=401, detail="invalid skill secret")
     payload = await request.json()
     user_request = payload.get("userRequest") or {}
     utterance = str(user_request.get("utterance") or "").strip()
     user = user_request.get("user") or {}
     user_id = str(user.get("id") or "unknown")
-    if settings.kakao_user_ids and user_id not in settings.kakao_user_ids:
+    if user_id not in settings.kakao_user_ids:
         return kakao_response("허용되지 않은 사용자입니다.")
     return kakao_response(await service.command("kakao", user_id, utterance))
 
 
 @app.post("/admin/check-all")
 async def check_all(x_flight_bot_secret: str | None = Header(default=None)):
-    if not settings.kakao_skill_secret or x_flight_bot_secret != settings.kakao_skill_secret:
-        raise HTTPException(status_code=401, detail="invalid secret")
+    if not settings.admin_secret:
+        raise HTTPException(status_code=404, detail="admin endpoint is disabled")
+    if not _secret_matches(settings.admin_secret, x_flight_bot_secret):
+        raise HTTPException(status_code=401, detail="invalid admin secret")
+    if service.scan_active:
+        return {"accepted": False, "reason": "scan already active"}
     asyncio.create_task(service.check_all())
     return {"accepted": True}
 
 
 def main():
-    # Container listens on 8080; compose maps HTTP_PORT on the host side.
-    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=settings.http_port, log_level="info")
 
 
 if __name__ == "__main__":
