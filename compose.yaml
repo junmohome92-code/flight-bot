@@ -3,14 +3,19 @@ services:
     build: .
     container_name: flight-bot
     restart: unless-stopped
+    init: true
     env_file:
       - .env
     shm_size: "1gb"
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - flight_bot_data:/data
       - flight_bot_debug:/debug
+    # Safe default: expose only on the host loopback interface. Put an
+    # authenticated reverse proxy in front if a Kakao webhook must be public.
     ports:
-      - "${HTTP_PORT:-8080}:8080"
+      - "127.0.0.1:${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"
 
 volumes:
   flight_bot_data:
