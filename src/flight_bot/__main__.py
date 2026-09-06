@@ -9,12 +9,12 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, Header, HTTPException, Request
 
 from .channels import MultiNotifier, build_telegram, start_discord
-from .config import get_settings
+from .config import SLOT_DESIGN_CAPACITY, get_settings
 from .db import Database
 from .service import FlightService
 
 settings = get_settings()
-db = Database(settings.database_path)
+db = Database(settings.database_path, slot_limit=settings.slot_active_limit)
 service = FlightService(settings, db)
 notifier = MultiNotifier()
 service.set_notifier(notifier)
@@ -35,13 +35,18 @@ def _secret_matches(expected: str, supplied: str | None) -> bool:
 async def lifespan(app: FastAPI):
     global telegram_app, discord_client
     settings.validate_runtime_security()
-    for hour in settings.scheduled_hours:
+
+    # One scheduled scan every configured interval. Exactly one of those scans
+    # also emits the regular daily price summary, so no extra Google request is
+    # created just for the summary.
+    for hour in settings.scheduled_search_hours:
         scheduler.add_job(
             service.check_all,
             "cron",
             hour=hour,
             minute=0,
-            id=f"check-{hour}",
+            kwargs={"notify_daily_summary": hour == settings.daily_summary_hour},
+            id=f"price-scan-{hour:02d}",
             replace_existing=True,
             max_instances=1,
             coalesce=True,
@@ -74,13 +79,17 @@ async def health():
         "provider_accepted_for_alerts": bool(getattr(service.provider, "accepted_for_alerts", True)),
         "require_verified_alerts": settings.require_verified_alerts,
         "browser_headless": settings.browser_headless,
+        "search_interval_hours": settings.search_interval_hours,
+        "daily_summary_hour": settings.daily_summary_hour,
+        "browser_search_storage_isolated": True,
         "telegram_connected": notifier.telegram_app is not None,
         "discord_connected": discord_ready,
         "kakao_skill_enabled": bool(settings.kakao_skill_secret),
         "admin_endpoint_enabled": bool(settings.admin_secret),
         "scan_active": service.scan_active,
         "slots_used": len(db.list_slots()),
-        "slots_max": 3,
+        "slots_max": settings.slot_active_limit,
+        "slots_design_capacity": SLOT_DESIGN_CAPACITY,
     }
 
 
@@ -108,7 +117,7 @@ async def check_all(x_flight_bot_secret: str | None = Header(default=None)):
         raise HTTPException(status_code=401, detail="invalid admin secret")
     if service.scan_active:
         return {"accepted": False, "reason": "scan already active"}
-    asyncio.create_task(service.check_all())
+    asyncio.create_task(service.check_all(notify_daily_summary=False))
     return {"accepted": True}
 
 
