@@ -3,8 +3,8 @@ setlocal
 chcp 65001 >nul
 cd /d "%~dp0.."
 
-if not exist ".venv-win\Scripts\python.exe" (
-  echo [FIRST RUN] Preparing Python environment automatically...
+if not exist ".venv-provider-poc\Scripts\python.exe" (
+  echo [FIRST RUN] Preparing isolated provider test environment automatically...
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup-and-unit-test.ps1"
   if errorlevel 1 (
     echo [ERROR] Automatic setup failed.
@@ -23,7 +23,7 @@ echo  Visible Microsoft Edge / results page only
 echo ==================================================
 echo.
 
-".venv-win\Scripts\python.exe" "scripts\skyscanner_flight_probe.py"
+".venv-provider-poc\Scripts\python.exe" "scripts\skyscanner_flight_probe.py"
 set RC=%ERRORLEVEL%
 
 echo.
