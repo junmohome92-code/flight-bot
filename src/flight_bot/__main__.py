@@ -31,6 +31,13 @@ def _secret_matches(expected: str, supplied: str | None) -> bool:
     return bool(expected and supplied and secrets.compare_digest(expected, supplied))
 
 
+def _require_admin(supplied: str | None) -> None:
+    if not settings.admin_secret:
+        raise HTTPException(status_code=404, detail="admin endpoint is disabled")
+    if not _secret_matches(settings.admin_secret, supplied):
+        raise HTTPException(status_code=401, detail="invalid admin secret")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global telegram_app, discord_client
@@ -45,7 +52,7 @@ async def lifespan(app: FastAPI):
             "cron",
             hour=hour,
             minute=0,
-            kwargs={"notify_daily_summary": hour == settings.daily_summary_hour},
+            kwargs={"notify_target": True, "notify_daily_summary": hour == settings.daily_summary_hour},
             id=f"price-scan-{hour:02d}",
             replace_existing=True,
             max_instances=1,
@@ -111,14 +118,50 @@ async def kakao_skill(request: Request, x_flight_bot_secret: str | None = Header
 
 @app.post("/admin/check-all")
 async def check_all(x_flight_bot_secret: str | None = Header(default=None)):
-    if not settings.admin_secret:
-        raise HTTPException(status_code=404, detail="admin endpoint is disabled")
-    if not _secret_matches(settings.admin_secret, x_flight_bot_secret):
-        raise HTTPException(status_code=401, detail="invalid admin secret")
+    """Start the normal all-slot scan now, including one-shot target alerts."""
+    _require_admin(x_flight_bot_secret)
     if service.scan_active:
         return {"accepted": False, "reason": "scan already active"}
-    asyncio.create_task(service.check_all(notify_daily_summary=False))
-    return {"accepted": True}
+    asyncio.create_task(service.check_all(notify_target=True, notify_daily_summary=False))
+    return {"accepted": True, "mode": "target-check-all"}
+
+
+@app.post("/admin/daily-summary")
+async def daily_summary(x_flight_bot_secret: str | None = Header(default=None)):
+    """Force the regular summary now without consuming a target-alert latch."""
+    _require_admin(x_flight_bot_secret)
+    if service.scan_active:
+        return {"accepted": False, "reason": "scan already active"}
+    asyncio.create_task(service.check_all(notify_target=False, notify_daily_summary=True))
+    return {"accepted": True, "mode": "daily-summary-all", "target_alerts": False}
+
+
+@app.post("/admin/check-slot/{slot_id}")
+async def check_slot(slot_id: int, x_flight_bot_secret: str | None = Header(default=None)):
+    """Run one real slot search and exercise its one-shot target alert."""
+    _require_admin(x_flight_bot_secret)
+    if service.scan_active:
+        return {"accepted": False, "reason": "all-slot scan already active"}
+    result = await service.check_slot(
+        slot_id,
+        notify_target=True,
+        notify_daily_summary=False,
+    )
+    return {"accepted": True, "mode": "target-check-slot", "slot_id": slot_id, "result": result}
+
+
+@app.post("/admin/daily-summary/{slot_id}")
+async def daily_summary_slot(slot_id: int, x_flight_bot_secret: str | None = Header(default=None)):
+    """Force one slot's regular summary without changing target-alert state."""
+    _require_admin(x_flight_bot_secret)
+    if service.scan_active:
+        return {"accepted": False, "reason": "all-slot scan already active"}
+    result = await service.check_slot(
+        slot_id,
+        notify_target=False,
+        notify_daily_summary=True,
+    )
+    return {"accepted": True, "mode": "daily-summary-slot", "slot_id": slot_id, "target_alerts": False, "result": result}
 
 
 def main():
