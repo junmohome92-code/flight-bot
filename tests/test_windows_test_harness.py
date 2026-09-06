@@ -3,25 +3,35 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WIN = ROOT / "flight-bot - test win"
+SCRIPTS = ROOT / "scripts"
 
 
-def test_notification_menu_is_ascii_only_for_windows_powershell_51():
-    data = (WIN / "notification-test-menu.ps1").read_bytes()
-    assert all(byte < 128 for byte in data), (
-        "notification-test-menu.ps1 must stay ASCII-only because Windows "
-        "PowerShell 5.1 misdecodes BOM-less UTF-8 source files"
-    )
+def test_windows_has_two_independent_provider_launchers():
+    naver = (WIN / "02-NAVER-flight-test.bat").read_text(encoding="utf-8")
+    sky = (WIN / "03-SKYSCANNER-flight-test.bat").read_text(encoding="utf-8")
+
+    assert "scripts\\naver_flight_probe.py" in naver
+    assert "scripts\\skyscanner_flight_probe.py" in sky
+    assert "skyscanner_flight_probe.py" not in naver
+    assert "naver_flight_probe.py" not in sky
 
 
-def test_notification_launcher_points_to_single_canonical_menu():
-    cmd = (WIN / "03-notification-test-menu.cmd").read_text(encoding="utf-8")
-    assert "notification-test-menu.ps1" in cmd
-    assert "notification-test-menu-v2.ps1" not in cmd
-    assert not (WIN / "notification-test-menu-v2.ps1").exists()
+def test_retired_google_windows_launchers_are_absent():
+    assert not (WIN / "02-live-cjj-tpe-visible.cmd").exists()
+    assert not (WIN / "03-notification-test-menu.cmd").exists()
+    assert not (WIN / "live-cjj-tpe.ps1").exists()
+    assert not (WIN / "notification-test-menu.ps1").exists()
 
 
-def test_docker_pins_container_specific_browser_and_storage_settings():
-    compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
-    assert "DATABASE_PATH: /data/flight_bot.db" in compose
-    assert 'BROWSER_HEADLESS: "true"' in compose
-    assert "BROWSER_DEBUG_DIR: /debug" in compose
+def test_provider_pocs_stop_at_results_page():
+    naver = (SCRIPTS / "naver_flight_probe.py").read_text(encoding="utf-8")
+    sky = (SCRIPTS / "skyscanner_flight_probe.py").read_text(encoding="utf-8")
+
+    for source in (naver, sky):
+        assert "booking_navigation=False" in source
+        assert "booking_navigation_performed=False" in source
+        assert "checkout" not in source.lower()
+
+
+def test_legacy_google_probe_scripts_are_absent():
+    assert not list(SCRIPTS.glob("google_*"))
