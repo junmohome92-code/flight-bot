@@ -36,6 +36,10 @@ class FakeProvider:
             verified_checkout_price=price if self.verified else None,
             price_verified=self.verified,
             verification_status="external_checkout_final_total" if self.verified else "unverified",
+            result_url="https://www.google.com/travel/flights/search?test=1",
+            display_offers=[
+                {"price": price, "airline": "TEST AIR", "times": ["10:00 AM", "12:00 PM"], "nonstop": True}
+            ],
             raw={"observed_price": price},
             fetched_at=datetime.now(timezone.utc),
         )
@@ -71,21 +75,62 @@ def make_slot(db: Database, *, owner_id="1"):
 
 
 @pytest.mark.asyncio
-async def test_target_alert_latches_and_rearms(tmp_path):
+async def test_target_alert_is_one_shot_until_target_is_explicitly_changed(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     slot = make_slot(db)
-    provider = FakeProvider([340000, 330000, 360000, 345000])
+    provider = FakeProvider([340000, 330000, 360000, 345000, 340000])
     service = FlightService(Settings(require_verified_alerts=True), db, provider=provider)
     notifier = FakeNotifier()
     service.set_notifier(notifier)
 
-    await service.check_slot(slot.id, notify_target=True)
-    await service.check_slot(slot.id, notify_target=True)
-    await service.check_slot(slot.id, notify_target=True)
-    await service.check_slot(slot.id, notify_target=True)
+    for _ in range(4):
+        await service.check_slot(slot.id, notify_target=True)
 
+    assert len(notifier.messages) == 1
+    assert notifier.messages[0][2].startswith("🔥 목표가 도달")
+    assert [call[3] for call in provider.calls] == [350000, None, None, None]
+    assert db.get_slot(slot.id).alert_state == "ALERTED"
+
+    db.set_target(slot.id, 355000)
+    await service.check_slot(slot.id, notify_target=True)
     assert len(notifier.messages) == 2
-    assert [call[3] for call in provider.calls] == [350000, None, None, 350000]
+    assert db.get_slot(slot.id).alert_state == "ALERTED"
+
+
+@pytest.mark.asyncio
+async def test_daily_summary_is_sent_once_when_requested_and_uses_cheapest_window(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    slot = make_slot(db)
+    provider = FakeProvider([400000, 390000])
+    service = FlightService(Settings(), db, provider=provider)
+    notifier = FakeNotifier()
+    service.set_notifier(notifier)
+
+    await service.check_slot(slot.id, notify_target=True, notify_daily_summary=False)
+    assert notifier.messages == []
+
+    await service.check_slot(slot.id, notify_target=True, notify_daily_summary=True)
+    assert len(notifier.messages) == 1
+    text = notifier.messages[0][2]
+    assert text.startswith("📊 정기 가격 알림")
+    assert "Google Flights 직항 왕복가" in text
+    assert "390,000" in text
+    assert text.count("https://") == 1
+
+
+@pytest.mark.asyncio
+async def test_same_scan_does_not_send_target_and_daily_summary_twice(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    slot = make_slot(db)
+    provider = FakeProvider([340000])
+    service = FlightService(Settings(), db, provider=provider)
+    notifier = FakeNotifier()
+    service.set_notifier(notifier)
+
+    await service.check_slot(slot.id, notify_target=True, notify_daily_summary=True)
+
+    assert len(notifier.messages) == 1
+    assert notifier.messages[0][2].startswith("🔥 목표가 도달")
 
 
 @pytest.mark.asyncio
@@ -105,7 +150,7 @@ async def test_unverified_below_target_never_alerts_when_required(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_provider_hard_alert_gate_blocks_legacy_even_when_verified_requirement_disabled(tmp_path):
+async def test_provider_hard_alert_gate_blocks_provider_even_when_verified_requirement_disabled(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     slot = make_slot(db)
     provider = FakeProvider([330000], verified=False, accepted_for_alerts=False)
