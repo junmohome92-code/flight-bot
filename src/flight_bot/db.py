@@ -6,9 +6,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from .config import SLOT_DESIGN_CAPACITY
 from .models import ALERT_ARMED, ALERTED, FlightOffer, WatchSlot
 
-MAX_SLOTS = 3
+DEFAULT_ACTIVE_SLOT_LIMIT = 5
 
 
 class StaleSlotError(RuntimeError):
@@ -96,8 +97,11 @@ CREATE INDEX IF NOT EXISTS idx_search_runs_slot_started ON search_runs_v2(slot_i
 
 
 class Database:
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, slot_limit: int = DEFAULT_ACTIVE_SLOT_LIMIT):
+        if not 1 <= int(slot_limit) <= SLOT_DESIGN_CAPACITY:
+            raise ValueError(f"slot_limit must be between 1 and {SLOT_DESIGN_CAPACITY}")
         self.path = path
+        self.slot_limit = int(slot_limit)
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
@@ -121,7 +125,6 @@ class Database:
         return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
     def _migrate_legacy(self, conn: sqlite3.Connection) -> None:
-        # CREATE TABLE IF NOT EXISTS does not add columns to an existing DB.
         watch_columns = self._columns(conn, "watch_slots")
         watch_additions = {
             "target_price": "INTEGER NOT NULL DEFAULT 0",
@@ -133,8 +136,6 @@ class Database:
             "last_alerted_price": "INTEGER",
             "last_alerted_at": "TEXT",
             "currency": "TEXT NOT NULL DEFAULT 'KRW'",
-            # SQLite cannot add a non-constant generated UUID default. Add the
-            # column nullable, populate it, and enforce non-empty values in code.
             "generation": "TEXT",
             "revision": "INTEGER NOT NULL DEFAULT 1",
         }
@@ -145,8 +146,6 @@ class Database:
             "UPDATE watch_slots SET generation=lower(hex(randomblob(16))) WHERE generation IS NULL OR generation=''"
         )
         conn.execute("UPDATE watch_slots SET revision=1 WHERE revision IS NULL OR revision<1")
-        # Legacy rows created before target_price became mandatory may contain 0.
-        # Keep them visible but paused so they cannot silently scan/alert.
         conn.execute("UPDATE watch_slots SET enabled=0 WHERE target_price<=0")
 
         offer_columns = self._columns(conn, "offers")
@@ -167,9 +166,7 @@ class Database:
         for name, ddl in offer_additions.items():
             if name not in offer_columns:
                 conn.execute(f"ALTER TABLE offers ADD COLUMN {name} {ddl}")
-        conn.execute(
-            "UPDATE offers SET observed_price=total_price WHERE observed_price IS NULL"
-        )
+        conn.execute("UPDATE offers SET observed_price=total_price WHERE observed_price IS NULL")
 
         alert_columns = self._columns(conn, "alert_history")
         alert_additions = {
@@ -208,7 +205,13 @@ class Database:
         )
 
     def _occupied_ids(self, conn: sqlite3.Connection) -> set[int]:
-        return {row[0] for row in conn.execute("SELECT id FROM watch_slots WHERE id BETWEEN 1 AND 3")}
+        return {
+            row[0]
+            for row in conn.execute(
+                "SELECT id FROM watch_slots WHERE id BETWEEN 1 AND ?",
+                (SLOT_DESIGN_CAPACITY,),
+            )
+        }
 
     def add_slot(
         self,
@@ -233,9 +236,12 @@ class Database:
         generation = uuid4().hex
         with self.connect() as conn:
             occupied = self._occupied_ids(conn)
-            slot_id = next((idx for idx in range(1, MAX_SLOTS + 1) if idx not in occupied), None)
+            slot_id = next((idx for idx in range(1, self.slot_limit + 1) if idx not in occupied), None)
             if slot_id is None:
-                raise ValueError("저장 슬롯은 정확히 3개이며 모두 사용 중입니다. 기존 슬롯을 삭제해 주세요.")
+                raise ValueError(
+                    f"현재 사용 가능한 감시 슬롯은 {self.slot_limit}개이며 모두 사용 중입니다. "
+                    f"구조상 최대 {SLOT_DESIGN_CAPACITY}개까지 확장 가능합니다."
+                )
             conn.execute(
                 """INSERT INTO watch_slots
                 (id, owner_platform, owner_id, origin, destination, depart_date, return_date,
@@ -270,8 +276,8 @@ class Database:
         owner_id: str | None = None,
     ) -> list[WatchSlot]:
         with self.connect() as conn:
-            sql = "SELECT * FROM watch_slots WHERE id BETWEEN 1 AND 3"
-            params: list[object] = []
+            sql = "SELECT * FROM watch_slots WHERE id BETWEEN 1 AND ?"
+            params: list[object] = [SLOT_DESIGN_CAPACITY]
             if enabled_only:
                 sql += " AND enabled=1"
             if owner_platform is not None:
@@ -285,7 +291,7 @@ class Database:
         return [self._slot(row) for row in rows]
 
     def get_slot(self, slot_id: int) -> WatchSlot | None:
-        if slot_id not in {1, 2, 3}:
+        if not 1 <= int(slot_id) <= SLOT_DESIGN_CAPACITY:
             return None
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM watch_slots WHERE id=?", (slot_id,)).fetchone()
