@@ -11,11 +11,15 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from .channels import MultiNotifier, build_telegram, start_discord
 from .config import SLOT_DESIGN_CAPACITY, get_settings
 from .db import Database
+from .runtime_results_provider import RuntimeGoogleResultsProvider
 from .service import FlightService
 
 settings = get_settings()
 db = Database(settings.database_path, slot_limit=settings.slot_active_limit)
-service = FlightService(settings, db)
+# Production/manual notification searches must use the same Cheapest-first flow
+# that passed the visible Windows acceptance test. Do not fall back to the old
+# simplified runtime selector here.
+service = FlightService(settings, db, provider=RuntimeGoogleResultsProvider(settings))
 notifier = MultiNotifier()
 service.set_notifier(notifier)
 scheduler = AsyncIOScheduler(timezone=settings.timezone)
@@ -89,6 +93,8 @@ async def health():
         "search_interval_hours": settings.search_interval_hours,
         "daily_summary_hour": settings.daily_summary_hour,
         "browser_search_storage_isolated": True,
+        "cheapest_selected_full_reload": True,
+        "price_unavailable_recovery_reloads": 2,
         "telegram_connected": notifier.telegram_app is not None,
         "discord_connected": discord_ready,
         "kakao_skill_enabled": bool(settings.kakao_skill_secret),
