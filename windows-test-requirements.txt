@@ -1,0 +1,2 @@
+# Standalone Windows Naver SSE test harness.
+pytest==8.4.2
