@@ -23,7 +23,7 @@ echo  Visible Microsoft Edge / results page only
 echo ==================================================
 echo.
 
-".venv-provider-poc\Scripts\python.exe" "scripts\naver_flight_probe.py"
+".venv-provider-poc\Scripts\python.exe" "scripts\naver_flight_probe_runtime.py"
 set RC=%ERRORLEVEL%
 
 echo.
