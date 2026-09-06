@@ -52,8 +52,14 @@ class FlightOffer:
     checked_baggage: str | None = None
     booking_provider: str | None = None
     booking_url: str | None = None
+    # Product-facing link. For the current scope this is the Google Flights
+    # round-trip result page and is the only URL exposed in alerts.
+    result_url: str | None = None
     separate_ticket: bool | None = None
     nonstop: bool | None = None
+    # Ranked Google Flights rows prepared for notification. This is transient
+    # presentation data; the lowest row remains the persisted primary offer.
+    display_offers: list[dict[str, Any]] | None = None
     raw: dict[str, Any] | None = None
     fetched_at: datetime | None = None
     observed_price_value: int | None = None
@@ -80,3 +86,8 @@ class FlightOffer:
         if self.verified_checkout_price is not None:
             return int(self.verified_checkout_price)
         return int(self.total_price)
+
+    @property
+    def google_flights_url(self) -> str | None:
+        """Google Flights result-page URL used in user-facing messages."""
+        return self.result_url or self.booking_url

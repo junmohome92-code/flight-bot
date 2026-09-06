@@ -28,6 +28,8 @@ class PriceUnavailableError(ProviderError):
 _FLIGHT_NO_RE = re.compile(r"\b([A-Z0-9]{2,3}\s?\d{2,4})\b")
 _CHEAPEST_RE = re.compile(r"^\s*(?:Cheapest\b|최저가)", re.I)
 _KRW_TEXT_RE = re.compile(r"₩\s*[0-9][0-9,]*")
+_TIME_RE = re.compile(r"\b\d{1,2}:\d{2}(?:\s?[AP]M)?\b", re.I)
+_STOP_RE = re.compile(r"\b\d+\s*stops?\b|\bstops?\b|경유", re.I)
 
 
 def parse_krw_price(text: str | None) -> int | None:
@@ -39,23 +41,96 @@ def parse_all_krw_prices(text: str | None) -> list[int]:
     return parse_krw_prices(text)
 
 
+def is_nonstop_row(text: str | None) -> bool:
+    """Return True only when Google explicitly marks the row as nonstop/direct."""
+    value = text or ""
+    if "직항" in value:
+        return True
+    lower = value.lower()
+    if "nonstop" in lower:
+        return True
+    if _STOP_RE.search(value):
+        return False
+    return False
+
+
+def _airline_from_row(row_text: str) -> str | None:
+    ignored = {"round trip", "nonstop", "price unavailable"}
+    for line in (line.strip() for line in row_text.splitlines() if line.strip()):
+        low = line.lower()
+        if low in ignored:
+            continue
+        if any(
+            token in low
+            for token in (
+                "airlines",
+                "airways",
+                "aero",
+                "jeju",
+                "t'way",
+                "tway",
+                "eastar",
+                "jin air",
+                "korean air",
+                "asiana",
+            )
+        ):
+            return line
+    return None
+
+
+def summarize_candidate(candidate: dict) -> dict:
+    row_text = str(candidate.get("text") or "")
+    times: list[str] = []
+    for value in _TIME_RE.findall(row_text):
+        normalized = re.sub(r"\s+", " ", value).strip()
+        if normalized not in times:
+            times.append(normalized)
+        if len(times) >= 2:
+            break
+    return {
+        "price": int(candidate["price"]),
+        "airline": _airline_from_row(row_text),
+        "flight_numbers": " / ".join(dict.fromkeys(_FLIGHT_NO_RE.findall(row_text))) or None,
+        "times": times,
+        "nonstop": is_nonstop_row(row_text),
+        "text": row_text[:2000],
+    }
+
+
+def rank_alert_candidates(candidates: list[dict], *, nonstop_only: bool, limit: int) -> list[dict]:
+    """Rank concrete Google rows for notification without inventing missing rows."""
+    ranked: list[dict] = []
+    seen: set[tuple[int, str]] = set()
+    for candidate in sorted(candidates, key=lambda item: int(item["price"])):
+        summary = summarize_candidate(candidate)
+        if nonstop_only and not summary["nonstop"]:
+            continue
+        key = (int(summary["price"]), str(summary.get("text") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        ranked.append(summary)
+        if len(ranked) >= max(1, int(limit)):
+            break
+    return ranked
+
+
 class GoogleFlightsPlaywrightProvider:
-    """Legacy runtime provider kept fail-closed until UI acceptance completes.
+    """Google Flights result-page observed-price provider.
 
-    Boundaries:
-    - It may return a row-scoped Google *observed* price.
-    - It never uses a page-wide KRW minimum.
-    - It never sets ``price_verified=True`` because the verification contract is
-      an external seller checkout final total, not a Google Booking option.
-    - It is hard-disabled for target alerts through ``accepted_for_alerts``.
-
-    The browser session is reused across sequential searches to avoid launching
-    Chromium for every slot. This improves runtime cost but does not make the
-    legacy provider an accepted production price source.
+    Product boundary:
+    - The alert price is the round-trip price visibly shown by Google Flights.
+    - Stop/connection rows are excluded by default through ``ALERT_NONSTOP_ONLY``.
+    - The notification may show several ranked direct rows, controlled by
+      ``ALERT_MAX_OFFERS``.
+    - The only user-facing URL is the Google Flights search-result page.
+    - Booking options, OTA links and external checkout are intentionally outside
+      the current product scope, so ``price_verified`` remains False.
     """
 
-    name = "google-playwright-legacy-unverified"
-    accepted_for_alerts = False
+    name = "google-playwright-results-observed"
+    accepted_for_alerts = True
 
     def __init__(self, settings: Settings, query_builder=None, browser_session=None):
         self.settings = settings
@@ -63,15 +138,14 @@ class GoogleFlightsPlaywrightProvider:
         self._browser_session = browser_session or PlaywrightBrowserSession(settings)
 
     def _default_query_builder(self, slot: WatchSlot) -> str:
-        # fast-flights remains URL-builder-only during the migration. Its parser
-        # is not trusted as a price source and will be removed after the accepted
-        # browser provider owns dynamic query construction.
+        # fast-flights is URL-builder-only. Its parser is never trusted as a
+        # price source; all prices come from concrete Google result rows.
         try:
             from fast_flights import FlightQuery, Passengers, create_query
         except ImportError as exc:
             raise ProviderError("fast-flights is not installed") from exc
 
-        max_stops = 0 if slot.nonstop else None
+        max_stops = 0 if (self.settings.alert_nonstop_only or slot.nonstop) else None
         query = create_query(
             flights=[
                 FlightQuery(
@@ -137,7 +211,18 @@ class GoogleFlightsPlaywrightProvider:
                     item = locator.nth(index)
                     if not await item.is_visible():
                         continue
-                    await item.click(timeout=4000)
+                    try:
+                        selected_before = await item.evaluate(
+                            """el => {
+                                const host = el.closest('[role="tab"], button, [role="button"]') || el;
+                                return host.getAttribute('aria-selected') === 'true' ||
+                                       host.getAttribute('aria-pressed') === 'true';
+                            }"""
+                        )
+                    except Exception:
+                        selected_before = False
+                    if not selected_before:
+                        await item.click(timeout=4000)
                     for _ in range(40):
                         try:
                             selected = await item.evaluate(
@@ -225,7 +310,6 @@ class GoogleFlightsPlaywrightProvider:
         return sorted(found.values(), key=lambda item: int(item["price"]))
 
     async def _extract_best(self, page: Page, slot: WatchSlot) -> dict:
-        await self._select_cheapest_tab(page)
         candidates = await self._row_candidates(page, slot)
         if not candidates:
             body = await page.locator("body").inner_text()
@@ -235,44 +319,25 @@ class GoogleFlightsPlaywrightProvider:
                 )
             raise ProviderError("Google Flights loaded results but no row-scoped KRW flight price was found")
 
-        best = candidates[0]
-        row_text = str(best["text"])
-        lower = row_text.lower()
-        if slot.nonstop and "nonstop" not in lower and "직항" not in row_text:
-            raise ProviderError("nonstop slot resolved to a non-nonstop candidate")
+        display = rank_alert_candidates(
+            candidates,
+            nonstop_only=self.settings.alert_nonstop_only,
+            limit=self.settings.alert_max_offers,
+        )
+        if not display:
+            raise ProviderError("Google Flights loaded results but no explicit nonstop/direct row was found")
 
-        airline = None
-        ignored = {"round trip", "nonstop", "price unavailable"}
-        for line in (line.strip() for line in row_text.splitlines() if line.strip()):
-            low = line.lower()
-            if low in ignored:
-                continue
-            if any(
-                token in low
-                for token in (
-                    "airlines",
-                    "airways",
-                    "aero",
-                    "jeju",
-                    "t'way",
-                    "eastar",
-                    "jin air",
-                    "korean air",
-                    "asiana",
-                )
-            ):
-                airline = line
-                break
-
+        best = display[0]
         return {
             "price": int(best["price"]),
-            "airline": airline,
-            "flight_numbers": " / ".join(dict.fromkeys(_FLIGHT_NO_RE.findall(row_text))) or None,
-            "nonstop": ("nonstop" in lower or "직항" in row_text),
-            "separate_ticket": "separate ticket" in lower or "self-transfer" in lower,
-            "text": row_text[:2000],
-            "row_price_count": len(candidates),
-            "source": best["source"],
+            "airline": best.get("airline"),
+            "flight_numbers": best.get("flight_numbers"),
+            "nonstop": bool(best.get("nonstop")),
+            "separate_ticket": "separate ticket" in str(best.get("text") or "").lower()
+            or "self-transfer" in str(best.get("text") or "").lower(),
+            "text": str(best.get("text") or "")[:2000],
+            "candidate_count": len(candidates),
+            "display_offers": display,
         }
 
     async def _debug_screenshot(self, page: Page, name: str) -> None:
@@ -289,13 +354,23 @@ class GoogleFlightsPlaywrightProvider:
         page: Page | None = None
         try:
             page = await self._browser_session.new_page()
-            await page.goto(self.build_search_url(slot), wait_until="domcontentloaded")
+            search_url = self.build_search_url(slot)
+            await page.goto(search_url, wait_until="domcontentloaded")
             await self._check_captcha(page)
             await self._wait_results(page)
+
+            # Live Windows acceptance showed that Cheapest can be selected while
+            # rows are still "Fetching results". Selecting Cheapest first and
+            # then doing one full refresh reliably materializes the price rows.
+            await self._select_cheapest_tab(page)
+            await page.reload(wait_until="domcontentloaded", timeout=self.settings.browser_timeout_ms)
+            await self._check_captcha(page)
+            await self._wait_results(page)
+            await self._select_cheapest_tab(page)
+
             best = await self._extract_best(page, slot)
             await self._debug_screenshot(page, f"slot-{slot.id}-results.png")
 
-            verification_requested = verify_below_price is not None and best["price"] <= verify_below_price
             return FlightOffer(
                 provider=self.name,
                 origin=slot.origin,
@@ -307,22 +382,25 @@ class GoogleFlightsPlaywrightProvider:
                 currency=self.settings.google_currency,
                 price_verified=False,
                 verified_checkout_price=None,
-                verification_status="external_checkout_not_implemented",
+                verification_status="google_flights_displayed_round_trip",
                 airline=best["airline"],
                 outbound_flight=best["flight_numbers"],
                 carry_on="정보 확인 불가",
                 checked_baggage="정보 확인 불가",
                 booking_provider=None,
-                booking_url=page.url,
+                booking_url=None,
+                result_url=search_url,
+                display_offers=best["display_offers"],
                 separate_ticket=best["separate_ticket"],
                 nonstop=best["nonstop"],
                 raw={
                     "observed_price": best["price"],
                     "row": best["text"],
-                    "row_price_count": best["row_price_count"],
-                    "price_source": best["source"],
-                    "verification_requested": verification_requested,
-                    "verification_status": "external_checkout_not_implemented",
+                    "row_candidate_count": best["candidate_count"],
+                    "display_offer_count": len(best["display_offers"]),
+                    "alert_nonstop_only": self.settings.alert_nonstop_only,
+                    "alert_max_offers": self.settings.alert_max_offers,
+                    "verification_status": "google_flights_displayed_round_trip",
                     "accepted_for_alerts": self.accepted_for_alerts,
                 },
                 fetched_at=datetime.now(timezone.utc),

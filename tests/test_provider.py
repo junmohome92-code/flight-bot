@@ -40,16 +40,20 @@ def test_query_builder_is_injectable():
         seen.append(value)
         return "https://example.test/search?tfs=fake&curr=KRW"
 
-    provider = GoogleFlightsPlaywrightProvider(Settings(), query_builder=builder)
+    provider = GoogleFlightsPlaywrightProvider(Settings(_env_file=None), query_builder=builder)
     value = slot()
     assert provider.build_search_url(value).endswith("curr=KRW")
     assert seen == [value]
 
 
-def test_legacy_provider_is_hard_disabled_for_alerts():
-    provider = GoogleFlightsPlaywrightProvider(Settings(), query_builder=lambda _: "https://example.test")
-    assert provider.accepted_for_alerts is False
-    assert "legacy-unverified" in provider.name
+def test_results_provider_is_alert_capable_for_observed_google_prices():
+    provider = GoogleFlightsPlaywrightProvider(
+        Settings(_env_file=None), query_builder=lambda _: "https://example.test"
+    )
+    assert provider.accepted_for_alerts is True
+    assert "results-observed" in provider.name
+    assert provider.settings.require_verified_alerts is False
+    assert provider.settings.alert_nonstop_only is True
 
 
 @pytest.mark.asyncio
@@ -63,7 +67,7 @@ async def test_provider_close_closes_reusable_browser_session():
 
     session = FakeSession()
     provider = GoogleFlightsPlaywrightProvider(
-        Settings(),
+        Settings(_env_file=None),
         query_builder=lambda _: "https://example.test",
         browser_session=session,
     )
