@@ -5,10 +5,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from playwright.async_api import Locator, Page
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .browser_session import PlaywrightBrowserSession
 from .config import Settings
+from .google_query import build_google_flights_search_url
+from .google_results_flow import (
+    GooglePriceUnavailableError,
+    GoogleResultsFlowError,
+    prepare_cheapest_surface,
+)
 from .google_ui_contract import flight_card_is_specific, parse_krw_prices
 from .models import FlightOffer, WatchSlot
 
@@ -26,7 +31,6 @@ class PriceUnavailableError(ProviderError):
 
 
 _FLIGHT_NO_RE = re.compile(r"\b([A-Z0-9]{2,3}\s?\d{2,4})\b")
-_CHEAPEST_RE = re.compile(r"^\s*(?:Cheapest\b|최저가)", re.I)
 _KRW_TEXT_RE = re.compile(r"₩\s*[0-9][0-9,]*")
 _TIME_RE = re.compile(r"\b\d{1,2}:\d{2}(?:\s?[AP]M)?\b", re.I)
 _STOP_RE = re.compile(r"\b\d+\s*stops?\b|\bstops?\b|경유", re.I)
@@ -117,20 +121,26 @@ def rank_alert_candidates(candidates: list[dict], *, nonstop_only: bool, limit: 
 
 
 class GoogleFlightsPlaywrightProvider:
-    """Google Flights result-page observed-price provider.
+    """Canonical Google Flights result-page observed-price provider.
+
+    The Windows acceptance probe and the Ubuntu/Docker runtime now share the
+    same query contract and Cheapest state machine. Platform-specific browser
+    launch/recovery remains an adapter detail only.
 
     Product boundary:
-    - The alert price is the round-trip price visibly shown by Google Flights.
-    - Stop/connection rows are excluded by default through ``ALERT_NONSTOP_ONLY``.
-    - The notification may show several ranked direct rows, controlled by
-      ``ALERT_MAX_OFFERS``.
-    - The only user-facing URL is the Google Flights search-result page.
-    - Booking options, OTA links and external checkout are intentionally outside
-      the current product scope, so ``price_verified`` remains False.
+    - round-trip price visibly shown by Google Flights,
+    - explicit Nonstop/direct rows only by default,
+    - configurable ranked direct rows in the notification,
+    - exactly one user-facing URL: the Google Flights result page,
+    - no Booking/OTA/checkout navigation.
     """
 
     name = "google-playwright-results-observed"
     accepted_for_alerts = True
+    selection_wait_ms = 25_000
+    ready_wait_ms = 8_000
+    price_recovery_reloads = 2
+    direct_settle_ms = 3_500
 
     def __init__(self, settings: Settings, query_builder=None, browser_session=None):
         self.settings = settings
@@ -138,40 +148,18 @@ class GoogleFlightsPlaywrightProvider:
         self._browser_session = browser_session or PlaywrightBrowserSession(settings)
 
     def _default_query_builder(self, slot: WatchSlot) -> str:
-        # fast-flights is URL-builder-only. Its parser is never trusted as a
-        # price source; all prices come from concrete Google result rows.
-        try:
-            from fast_flights import FlightQuery, Passengers, create_query
-        except ImportError as exc:
-            raise ProviderError("fast-flights is not installed") from exc
-
-        max_stops = 0 if (self.settings.alert_nonstop_only or slot.nonstop) else None
-        query = create_query(
-            flights=[
-                FlightQuery(
-                    date=slot.depart_date,
-                    from_airport=slot.origin,
-                    to_airport=slot.destination,
-                    max_stops=max_stops,
-                ),
-                FlightQuery(
-                    date=slot.return_date,
-                    from_airport=slot.destination,
-                    to_airport=slot.origin,
-                    max_stops=max_stops,
-                ),
-            ],
-            seat="economy",
-            trip="round-trip",
-            passengers=Passengers(adults=1),
+        # Do not put the nonstop filter into the TFS query. The exact accepted
+        # result URL requests the normal round-trip surface; direct-only policy
+        # is applied to concrete result rows after capture.
+        return build_google_flights_search_url(
+            origin=slot.origin,
+            destination=slot.destination,
+            depart_date=slot.depart_date,
+            return_date=slot.return_date,
             language=self.settings.google_language,
+            gl=self.settings.google_gl,
             currency=self.settings.google_currency,
-            max_stops=max_stops,
-            checked_bags=max(0, slot.checked_bag),
-            hide_separate_and_self_transfer=False,
         )
-        url = query.url()
-        return f"{url}{'&' if '?' in url else '?'}gl={self.settings.google_gl}"
 
     def build_search_url(self, slot: WatchSlot) -> str:
         return self._query_builder(slot)
@@ -187,59 +175,19 @@ class GoogleFlightsPlaywrightProvider:
         if await page.locator("iframe[src*='recaptcha'], div.g-recaptcha, div#recaptcha").count():
             raise CaptchaDetectedError("Google reCAPTCHA detected")
 
-    async def _wait_results(self, page: Page) -> None:
-        try:
-            await page.get_by_text(
-                re.compile(r"Departing flights|출발 항공편|Top departing flights|인기 출발 항공편", re.I)
-            ).first.wait_for(state="visible", timeout=self.settings.browser_timeout_ms)
-        except PlaywrightTimeoutError as exc:
-            body = (await page.locator("body").inner_text())[:1500]
-            if "price unavailable" in body.lower() or "가격 정보를 이용할 수" in body:
-                raise PriceUnavailableError(
-                    "Google Flights loaded the route but returned Price unavailable for this IP/session"
-                ) from exc
-            raise ProviderError(f"Google Flights results did not load: {body}") from exc
-
-    async def _select_cheapest_tab(self, page: Page) -> None:
-        for locator in (
-            page.get_by_role("tab", name=_CHEAPEST_RE),
-            page.get_by_role("button", name=_CHEAPEST_RE),
-            page.get_by_text(_CHEAPEST_RE),
-        ):
+    async def _reload_page(self, page: Page, search_url: str, timeout_ms: int) -> Page:
+        if not page.is_closed():
             try:
-                for index in range(await locator.count()):
-                    item = locator.nth(index)
-                    if not await item.is_visible():
-                        continue
-                    try:
-                        selected_before = await item.evaluate(
-                            """el => {
-                                const host = el.closest('[role="tab"], button, [role="button"]') || el;
-                                return host.getAttribute('aria-selected') === 'true' ||
-                                       host.getAttribute('aria-pressed') === 'true';
-                            }"""
-                        )
-                    except Exception:
-                        selected_before = False
-                    if not selected_before:
-                        await item.click(timeout=4000)
-                    for _ in range(40):
-                        try:
-                            selected = await item.evaluate(
-                                """el => {
-                                    const host = el.closest('[role="tab"], button, [role="button"]') || el;
-                                    return host.getAttribute('aria-selected') === 'true' ||
-                                           host.getAttribute('aria-pressed') === 'true';
-                                }"""
-                            )
-                        except Exception:
-                            selected = False
-                        if selected:
-                            return
-                        await page.wait_for_timeout(50)
+                await page.reload(wait_until="domcontentloaded", timeout=timeout_ms)
+                return page
             except Exception:
-                continue
-        raise ProviderError("Google Flights Cheapest/최저가 tab could not be selected")
+                if not page.is_closed():
+                    raise
+
+        replacement = await self._browser_session.new_page()
+        await replacement.goto(search_url, wait_until="domcontentloaded", timeout=timeout_ms)
+        print("runtime_page_recovery=opened-replacement")
+        return replacement
 
     async def _row_text_for_price_element(self, item: Locator, slot: WatchSlot) -> str:
         try:
@@ -353,23 +301,40 @@ class GoogleFlightsPlaywrightProvider:
     async def search(self, slot: WatchSlot, *, verify_below_price: int | None = None) -> FlightOffer:
         page: Page | None = None
         try:
-            page = await self._browser_session.new_page()
             search_url = self.build_search_url(slot)
-            await page.goto(search_url, wait_until="domcontentloaded")
+            print(f"runtime_search_start=slot-{slot.id} {slot.origin}->{slot.destination}")
+            print(f"runtime_query_contract=accepted-tfs-v1")
+            page = await self._browser_session.new_page()
+            await page.goto(
+                search_url,
+                wait_until="domcontentloaded",
+                timeout=self.settings.browser_timeout_ms,
+            )
+            print(f"runtime_selection_url={page.url}")
             await self._check_captcha(page)
-            await self._wait_results(page)
 
-            # Live Windows acceptance showed that Cheapest can be selected while
-            # rows are still "Fetching results". Selecting Cheapest first and
-            # then doing one full refresh reliably materializes the price rows.
-            await self._select_cheapest_tab(page)
-            await page.reload(wait_until="domcontentloaded", timeout=self.settings.browser_timeout_ms)
+            try:
+                page, recovery_count = await prepare_cheapest_surface(
+                    page,
+                    search_url,
+                    reload_page=self._reload_page,
+                    timeout_ms=self.settings.browser_timeout_ms,
+                    selection_wait_ms=self.selection_wait_ms,
+                    ready_wait_ms=self.ready_wait_ms,
+                    recovery_reloads=self.price_recovery_reloads,
+                )
+            except GooglePriceUnavailableError as exc:
+                raise PriceUnavailableError(str(exc)) from exc
+            except GoogleResultsFlowError as exc:
+                raise ProviderError(str(exc)) from exc
+
             await self._check_captcha(page)
-            await self._wait_results(page)
-            await self._select_cheapest_tab(page)
-
+            print(f"runtime_direct_settle_ms={self.direct_settle_ms}")
+            await page.wait_for_timeout(self.direct_settle_ms)
             best = await self._extract_best(page, slot)
             await self._debug_screenshot(page, f"slot-{slot.id}-results.png")
+            print(f"runtime_direct_offer_count={len(best['display_offers'])}")
+            print(f"runtime_lowest_direct_round_trip={best['price']}")
 
             return FlightOffer(
                 provider=self.name,
@@ -402,6 +367,9 @@ class GoogleFlightsPlaywrightProvider:
                     "alert_max_offers": self.settings.alert_max_offers,
                     "verification_status": "google_flights_displayed_round_trip",
                     "accepted_for_alerts": self.accepted_for_alerts,
+                    "query_contract": "accepted-tfs-v1",
+                    "cheapest_selected_full_reload": 1,
+                    "price_recovery_reload_count": recovery_count,
                 },
                 fetched_at=datetime.now(timezone.utc),
             )
@@ -416,6 +384,6 @@ class GoogleFlightsPlaywrightProvider:
         finally:
             if page:
                 try:
-                    await page.close()
+                    await self._browser_session.release_page(page)
                 except Exception:
                     pass
