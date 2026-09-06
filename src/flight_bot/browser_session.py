@@ -8,16 +8,13 @@ from .config import Settings
 
 
 class PlaywrightBrowserSession:
-    """Reuse Chromium while giving every Google price search fresh storage.
+    """Reuse one Chromium process while isolating every price observation.
 
-    Google Flights observations must not inherit cookies, HTTP cache, local
-    storage, IndexedDB or service-worker state from the previous two-hour scan.
-    We therefore keep only the Chromium *process* warm and create a brand-new
-    BrowserContext for each search. Before the next search starts, every prior
-    context is destroyed.
-
-    ``BROWSER_PROFILE_DIR`` remains accepted by Settings for compatibility with
-    older deployments, but runtime price searches intentionally do not use it.
+    Each search gets a brand-new BrowserContext, so cookies, HTTP cache,
+    localStorage, IndexedDB and service-worker state are never inherited from a
+    previous two-hour observation. Unlike the old implementation, creating a
+    second context no longer destroys the first one; this is required for the
+    validated max-two concurrent slot policy.
     """
 
     def __init__(self, settings: Settings):
@@ -41,19 +38,7 @@ class PlaywrightBrowserSession:
             )
             return self._browser
 
-    async def _discard_old_contexts(self) -> None:
-        old = list(self._contexts)
-        self._contexts.clear()
-        for context in old:
-            try:
-                await context.close()
-            except Exception:
-                pass
-
     async def _new_isolated_context(self) -> BrowserContext:
-        # Searches are serialized by FlightService. Destroying the previous
-        # context here is therefore safe and guarantees a clean observation.
-        await self._discard_old_contexts()
         browser = await self._ensure_started()
         context = await browser.new_context(
             locale="en-US",
@@ -80,7 +65,7 @@ class PlaywrightBrowserSession:
         return page
 
     async def release_page(self, page: Page) -> None:
-        """Destroy the page's whole context immediately when supported."""
+        """Destroy only this search's context, preserving other active searches."""
         try:
             context = page.context
         except Exception:
@@ -98,7 +83,14 @@ class PlaywrightBrowserSession:
             pass
 
     async def close(self) -> None:
-        await self._discard_old_contexts()
+        contexts = list(self._contexts)
+        self._contexts.clear()
+        for context in contexts:
+            try:
+                await context.close()
+            except Exception:
+                pass
+
         browser, playwright = self._browser, self._playwright
         self._browser = None
         self._playwright = None
