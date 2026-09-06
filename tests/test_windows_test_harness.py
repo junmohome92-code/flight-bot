@@ -16,6 +16,19 @@ def test_windows_has_two_independent_provider_launchers():
     assert "naver_flight_probe.py" not in sky
 
 
+def test_windows_provider_launchers_self_bootstrap_isolated_venv():
+    for name in ("02-NAVER-flight-test.bat", "03-SKYSCANNER-flight-test.bat"):
+        launcher = (WIN / name).read_text(encoding="utf-8")
+        assert ".venv-provider-poc\\Scripts\\python.exe" in launcher
+        assert "setup-and-unit-test.ps1" in launcher
+        assert ".venv-win\\Scripts\\python.exe" not in launcher
+
+    setup = (WIN / "setup-and-unit-test.ps1").read_text(encoding="utf-8")
+    assert ".venv-provider-poc" in setup
+    assert "provider-poc-requirements.txt" in setup
+    assert "-e '.[dev]'" not in setup
+
+
 def test_retired_google_windows_launchers_are_absent():
     assert not (WIN / "02-live-cjj-tpe-visible.cmd").exists()
     assert not (WIN / "03-notification-test-menu.cmd").exists()
