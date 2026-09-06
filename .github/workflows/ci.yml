@@ -57,6 +57,7 @@ jobs:
           tests/test_google_cheapest_selection.py
           tests/test_google_departure_transition.py
           tests/test_google_price_unavailable_recovery.py
+          tests/test_google_return_phase_boundary.py
 
   docker-smoke:
     runs-on: ubuntu-latest

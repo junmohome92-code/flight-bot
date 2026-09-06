@@ -205,6 +205,83 @@ async def click_specific_candidate(page: Page, candidate: dict, *, prefix: str) 
     return str(target.get("mode") or "specific-card")
 
 
+async def _install_returning_candidate_guard(page: Page) -> dict:
+    """Reject stale outbound rows before they can become Returning candidates.
+
+    The caller switches the capture phase to ``returning`` before clicking the
+    outbound card so a full navigation cannot lose the next phase. During the
+    short transition Google may still keep the old CJJ->TPE DOM mounted. The
+    capture scanner used to re-label that old row as a Returning candidate.
+
+    Install an instance-level ``candidates.push`` guard that:
+    - rejects every Returning candidate until the Returning marker is visible;
+    - requires ``returningMarkerAtSeen=True`` after the marker;
+    - rejects an explicit outbound code order (origin before destination).
+
+    Rows without both airport codes remain eligible because current Google cards
+    sometimes omit route tokens; the later flight-card contract still applies.
+    """
+    try:
+        value = await page.evaluate(
+            r"""() => {
+                const s = window.__flightBotCaptureV4;
+                if (!s || !Array.isArray(s.candidates)) return {installed: false, purged: 0};
+                const cfg = window.__flightBotInitConfig || {};
+                const outboundOrigin = String(cfg.origin || '').toUpperCase();
+                const outboundDestination = String(cfg.destination || '').toUpperCase();
+
+                function normalize(text) {
+                    return String(text || '')
+                      .replace(/[–—‑−]/g, '-')
+                      .replace(/\s+/g, ' ')
+                      .trim()
+                      .toUpperCase();
+                }
+
+                function valid(item) {
+                    if (!item || item.phase !== 'returning') return true;
+                    if (!s.returningMarker || item.returningMarkerAtSeen !== true) return false;
+
+                    const text = normalize(item.rowText);
+                    if (outboundOrigin && outboundDestination) {
+                        const originIndex = text.indexOf(outboundOrigin);
+                        const destinationIndex = text.indexOf(outboundDestination);
+                        if (originIndex >= 0 && destinationIndex >= 0 && originIndex < destinationIndex) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+
+                const items = s.candidates;
+                const before = items.length;
+                const kept = items.filter(valid);
+                items.splice(0, items.length, ...kept);
+                const purged = before - kept.length;
+
+                if (!items.__flightBotStrictReturningPushInstalled) {
+                    const nativePush = Array.prototype.push;
+                    Object.defineProperty(items, 'push', {
+                        configurable: true,
+                        writable: true,
+                        value: function(...nextItems) {
+                            return nativePush.apply(this, nextItems.filter(valid));
+                        }
+                    });
+                    Object.defineProperty(items, '__flightBotStrictReturningPushInstalled', {
+                        configurable: true,
+                        value: true
+                    });
+                }
+
+                return {installed: true, purged};
+            }"""
+        )
+    except Exception:
+        return {"installed": False, "purged": 0}
+    return value if isinstance(value, dict) else {"installed": False, "purged": 0}
+
+
 async def _stamp_returning_phase(page: Page) -> None:
     await page.evaluate(
         """() => {
@@ -217,6 +294,7 @@ async def _stamp_returning_phase(page: Page) -> None:
             s.returningMarkerAtMs = null;
         }"""
     )
+    await _install_returning_candidate_guard(page)
 
 
 async def _mark_returning_seen(page: Page) -> None:
@@ -232,6 +310,7 @@ async def _mark_returning_seen(page: Page) -> None:
                 }
             }"""
         )
+        await _install_returning_candidate_guard(page)
     except Exception:
         pass
 
@@ -253,6 +332,10 @@ async def wait_for_returning_with_recovery(
     If the error appears without a URL change, fail immediately because the click
     did not establish outbound-selection evidence.
     """
+    guard = await _install_returning_candidate_guard(page)
+    print(f"return_phase_guard_installed={guard.get('installed')}")
+    print(f"return_phase_stale_candidates_purged={int(guard.get('purged') or 0)}")
+
     reloads = 0
     cycle_wait = max(3000, min(timeout_ms, 8000)) / 1000
 
