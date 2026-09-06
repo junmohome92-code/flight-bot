@@ -66,6 +66,17 @@ function Test-TcpPortInUse {
     }
 }
 
+function Test-FlightBotDockerRunning {
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { return $false }
+    try {
+        $names = & docker ps --filter 'name=^/flight-bot$' --format '{{.Names}}' 2>$null
+        return [bool]($names | Where-Object { $_ -eq 'flight-bot' })
+    }
+    catch {
+        return $false
+    }
+}
+
 function Assert-RuntimeContract {
     param($Health)
     $errors = @()
@@ -98,15 +109,36 @@ function Assert-RuntimeContract {
         if (-not [bool]$Health.admin_endpoint_enabled) {
             $errors += 'Admin test endpoint is disabled.'
         }
+        if (-not [bool]$Health.telegram_connected) {
+            $errors += 'Telegram notifier is not connected.'
+        }
     }
     if ($errors.Count -gt 0) {
         Write-Host ''
         Write-Host 'RUNTIME CONTRACT CHECK FAILED' -ForegroundColor Red
         foreach ($item in $errors) { Write-Host " - $item" -ForegroundColor Red }
         Write-Host ''
-        Write-Host 'A stale/older bot may already be running on this port.' -ForegroundColor Yellow
+        Write-Host 'A stale/older bot or bad notifier configuration may be running on this port.' -ForegroundColor Yellow
         Write-Host 'Stop the old local process or run: docker compose down'
         throw 'Runtime contract mismatch. Refusing a misleading notification test.'
+    }
+}
+
+function Assert-AdminAuth {
+    param([string]$BaseUrl, [string]$Secret)
+    try {
+        $probe = Invoke-RestMethod `
+            -Method Post `
+            -Uri "$BaseUrl/admin/check-slot/999999" `
+            -Headers @{ 'X-Flight-Bot-Secret' = $Secret } `
+            -TimeoutSec 10
+        if (-not $probe.accepted) {
+            throw 'Admin probe was not accepted.'
+        }
+        Write-Host '[preflight] Admin secret matches the running bot.' -ForegroundColor Green
+    }
+    catch {
+        throw 'ADMIN_SECRET does not match the running bot, or the admin endpoint is unreachable. Restart the bot after changing .env.'
     }
 }
 
@@ -257,7 +289,14 @@ if ($health) {
     Write-Host ''
     Write-Host '[preflight] Existing Flight Bot runtime detected.' -ForegroundColor Yellow
     Assert-RuntimeContract -Health $health
-    $DockerMode = [bool]$health.browser_headless
+    Assert-AdminAuth -BaseUrl $BaseUrl -Secret $AdminSecret
+    $DockerMode = Test-FlightBotDockerRunning
+    if ($DockerMode) {
+        Write-Host '[preflight] Existing runtime source: Docker container flight-bot' -ForegroundColor Green
+    }
+    else {
+        Write-Host '[preflight] Existing runtime source: local/external process' -ForegroundColor Green
+    }
     Write-Host '[preflight] Existing runtime matches the required contract.' -ForegroundColor Green
 }
 else {
@@ -331,6 +370,7 @@ else {
         throw "Bot health check failed at $BaseUrl"
     }
     Assert-RuntimeContract -Health $health
+    Assert-AdminAuth -BaseUrl $BaseUrl -Secret $AdminSecret
 
     if ($runMode -eq '1' -and [bool]$health.browser_headless) {
         throw 'Local visible test unexpectedly started in headless mode.'
