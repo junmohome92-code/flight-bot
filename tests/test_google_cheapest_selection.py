@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 
 import pytest
 from playwright.async_api import async_playwright
 
-from scripts.google_booking_pointer_probe_v5 import capture_state_v5, select_cheapest_tab_v5
+# scripts/ is not an installed Python package in the production project. Add it
+# only for this browser-contract test, matching how the Windows launcher runs
+# the acceptance probe directly from the repository.
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+sys.path.insert(0, str(_SCRIPTS_DIR))
+from google_booking_pointer_probe_v5 import capture_state_v5, select_cheapest_tab_v5  # noqa: E402
 
 
 pytestmark = pytest.mark.skipif(
