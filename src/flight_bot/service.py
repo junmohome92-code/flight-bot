@@ -12,7 +12,7 @@ from .providers import GoogleFlightsPlaywrightProvider, ProviderError
 
 
 HELP = """항공권 감시봇 명령어
-/flight add CJJ TPE 2026-09-18 2026-09-20 350000 [nonstop]
+/flight add CJJ TPE 2026-09-18 2026-09-20 350000
 /flight list
 /flight check 1
 /flight target 1 330000
@@ -22,6 +22,7 @@ HELP = """항공권 감시봇 명령어
 /help
 
 저장 슬롯은 1/2/3 정확히 3개입니다. pause 상태도 슬롯을 차지합니다.
+알림 후보는 Google Flights 왕복 검색의 직항만 사용하며 경유편은 제외합니다.
 목표가 이하로 새로 진입했을 때만 한 번 알리고, 가격이 다시 목표가 위로 올라가면 재무장됩니다.
 """
 
@@ -52,27 +53,57 @@ class FlightService:
     @staticmethod
     def format_slot(slot: WatchSlot) -> str:
         state = "ON" if slot.enabled else "PAUSED"
-        direct = "직항" if slot.nonstop else "경유/혼합 허용"
         observed = f" / 최근 {slot.last_observed_price:,}{slot.currency}" if slot.last_observed_price else ""
         return (
             f"#{slot.id} [{state}/{slot.alert_state}] {slot.origin}→{slot.destination} "
-            f"{slot.depart_date}~{slot.return_date} / {direct} / 목표 {slot.target_price:,}{slot.currency}{observed}"
+            f"{slot.depart_date}~{slot.return_date} / 직항만 / 목표 {slot.target_price:,}{slot.currency}{observed}"
         )
 
-    @staticmethod
-    def format_offer(slot: WatchSlot, offer: FlightOffer) -> str:
-        if offer.price_verified and offer.verified_price is not None:
-            label = "✅ 최종 검증가"
-            price = offer.verified_price
-        else:
-            label = "🔎 Google 표시가"
-            price = offer.observed_price
-        ticket = " / 별도티켓·셀프트랜스퍼" if offer.separate_ticket else ""
+    def format_offer(self, slot: WatchSlot, offer: FlightOffer) -> str:
+        """Format one result-page alert with exactly one user-facing URL."""
+        rows = list(offer.display_offers or [])[: self.settings.alert_max_offers]
+        if not rows:
+            rows = [
+                {
+                    "price": offer.observed_price,
+                    "airline": offer.airline,
+                    "flight_numbers": offer.outbound_flight,
+                    "times": [],
+                    "nonstop": offer.nonstop,
+                }
+            ]
+
+        price_lines: list[str] = []
+        for index, row in enumerate(rows, start=1):
+            try:
+                price = int(row.get("price"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            details: list[str] = []
+            airline = str(row.get("airline") or "").strip()
+            if airline:
+                details.append(airline)
+            times = row.get("times") or []
+            if isinstance(times, list) and len(times) >= 2:
+                details.append(f"{times[0]} → {times[1]}")
+            flight_numbers = str(row.get("flight_numbers") or "").strip()
+            if flight_numbers:
+                details.append(flight_numbers)
+            suffix = f" · {' / '.join(details)}" if details else ""
+            price_lines.append(f"{index}. {price:,}{offer.currency}{suffix}")
+
+        if not price_lines:
+            price_lines.append(f"1. {offer.observed_price:,}{offer.currency}")
+
+        result_url = offer.google_flights_url or "링크 확인 불가"
         return (
-            f"✈️ {slot.origin} → {slot.destination}\n{slot.depart_date} ~ {slot.return_date}\n"
-            f"{label}: {price:,}{offer.currency}{ticket}\n목표가: {slot.target_price:,}{slot.currency}\n"
-            f"항공사: {offer.airline or '확인 필요'}\n편명: {offer.outbound_flight or '확인 필요'}\n"
-            f"위탁수하물: {offer.checked_baggage or '정보 확인 불가'}\nGoogle Flights: {offer.booking_url or '링크 확인 불가'}"
+            f"✈️ {slot.origin} → {slot.destination} 왕복\n"
+            f"{slot.depart_date} ~ {slot.return_date}\n"
+            f"Google Flights 직항 왕복가\n"
+            + "\n".join(price_lines)
+            + f"\n목표가: {slot.target_price:,}{slot.currency}"
+            + f"\n위탁수하물: {offer.checked_baggage or '정보 확인 불가'}"
+            + f"\nGoogle Flights 검색결과: {result_url}"
         )
 
     @staticmethod
@@ -214,7 +245,7 @@ class FlightService:
 
         if action == "add":
             if len(parts) < 7:
-                return "형식: /flight add CJJ TPE 2026-09-18 2026-09-20 350000 [nonstop]"
+                return "형식: /flight add CJJ TPE 2026-09-18 2026-09-20 350000"
             origin = parts[2].upper()
             destination = parts[3].upper()
             if not (self._valid_airport(origin) and self._valid_airport(destination)):
@@ -229,7 +260,6 @@ class FlightService:
                 target = int(parts[6].replace(",", ""))
             except ValueError:
                 return "목표가는 숫자로 입력해 주세요. 예: 350000"
-            nonstop = len(parts) >= 8 and parts[7].lower() in {"nonstop", "direct", "직항"}
             async with self._operation_lock:
                 try:
                     slot = self.db.add_slot(
@@ -240,7 +270,7 @@ class FlightService:
                         depart_date=parts[4],
                         return_date=parts[5],
                         target_price=target,
-                        nonstop=nonstop,
+                        nonstop=True,
                         checked_bag=0,
                     )
                 except ValueError as exc:
