@@ -1,4 +1,0 @@
-# Standalone Naver provider POC only.
-# Naver price extraction uses the SSE API and the Python standard library.
-# pytest is only for the local contract test harness.
-pytest==8.4.2
