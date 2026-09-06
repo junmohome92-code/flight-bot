@@ -4,14 +4,15 @@
 
 ## 현재 제품 범위
 
-현재 알람은 **Google Flights 검색결과 화면에 실제 표시된 왕복 가격**을 기준으로 합니다.
+알람은 **Google Flights 검색결과 화면에 실제 표시된 왕복 가격**을 기준으로 합니다.
 
 ```text
 Google Flights 왕복 검색
 → Cheapest/최저가
 → 직항(Nonstop) 행만 수집
+→ 중복 제거
 → 가격순 정렬
-→ 최저가 + 추가 직항 후보를 설정 개수만큼 표시
+→ 최저가 + 추가 직항 후보 표시
 → Google Flights 검색결과 링크 1개 제공
 ```
 
@@ -24,9 +25,7 @@ OTA/여행사 링크 제공      NO
 외부 checkout 검증        NO
 ```
 
-알람에서 사용자에게 제공하는 URL은 **Google Flights 검색결과 링크 하나뿐**입니다.
-
-## 검색 / 정기 알림 주기
+## 검색 / 알림 주기
 
 기본값:
 
@@ -35,41 +34,23 @@ SEARCH_INTERVAL_HOURS=2
 DAILY_SUMMARY_HOUR=8
 ```
 
-- 가격 검색은 매 2시간마다 수행합니다.
-- 기본 검색 시각은 `00, 02, 04, ... 22시`입니다.
-- 오전 8시 검색 결과는 하루 1회 **정기 가격 알림**으로도 전송합니다.
-- 정기 알림 때문에 Google을 한 번 더 조회하지 않습니다. 해당 2시간 검색 결과를 그대로 사용합니다.
-- 매 가격 검색마다 **새 BrowserContext**를 만들어 이전 검색의 cookies / HTTP cache / localStorage / IndexedDB / service worker 상태를 이어받지 않습니다.
-- Chromium process 자체는 재사용하므로 매번 브라우저 프로그램 전체를 재기동하지는 않습니다.
+- 가격 검색은 `00, 02, 04, ... 22시`처럼 2시간마다 수행합니다.
+- 오전 08시 검색은 하루 1회 **정기 가격 알림**도 전송합니다.
+- 정기 알림 때문에 별도 Google 조회를 추가하지 않습니다.
+- 각 검색은 **새 BrowserContext**를 사용하여 이전 검색의 cookie/cache/localStorage/IndexedDB 등을 다음 검색에 넘기지 않습니다.
 
-## 알람 정책
+## 목표가 알림
 
-기본값:
-
-```text
-ALERT_NONSTOP_ONLY=true
-ALERT_MAX_OFFERS=4
-REQUIRE_VERIFIED_ALERTS=false
-```
-
-- 경유편은 알람 후보에서 제외합니다.
-- `ALERT_MAX_OFFERS=4`는 최대 표시 개수입니다. 직항이 2개뿐이면 2개만 표시합니다.
-- 동일 항공편이 Google DOM에서 aria-label / visible text 두 경로로 중복 노출돼도 사용자 알림에서는 한 번만 표시합니다.
-- 목표가 비교는 Google Flights에 표시된 최저 직항 왕복가를 사용합니다.
-- 수하물 정보가 화면에서 신뢰성 있게 확인되지 않으면 `정보 확인 불가`로 표시합니다.
-
-### 목표가 도달 알림
-
-목표가 도달 알림은 **목표가 설정당 최초 1회만** 보냅니다.
+목표가 도달 알림은 **목표가 설정당 최초 1회만** 전송합니다.
 
 ```text
 ARMED
-→ Google 표시 최저 직항가 <= target
+→ 최저 직항 왕복가 <= target
 → SENDING
 → ALERTED
 ```
 
-`ALERTED` 이후에는 가격이 다시 목표가 위로 올라가거나 내려가도 자동 재무장하지 않습니다.
+`ALERTED` 이후 가격이 다시 위/아래로 움직여도 자동 재무장하지 않습니다.
 
 다시 목표가 알림을 받고 싶으면:
 
@@ -77,15 +58,13 @@ ARMED
 /flight target <슬롯번호> <새 목표가>
 ```
 
-로 목표가를 변경하면 `ARMED`로 다시 전환되어 1회 알림 기회가 생깁니다.
+를 사용합니다.
 
-목표가 알림이 정기 알림 시각과 같은 검색에서 처음 발생하면 같은 슬롯에 메시지가 2개 연속 가지 않도록 **목표가 도달 알림만 보내고 그날 정기 알림은 생략**합니다.
+정기 알림 시각과 목표가 최초 도달이 겹치면 같은 슬롯에 메시지가 2개 오지 않도록 **목표가 도달 알림만 전송**하고 그날 정기알림은 생략합니다.
 
-### 하루 1회 정기 가격 알림
+## 하루 1회 정기 가격 알림
 
-정기 알림은 목표가와 무관하게 현재 직항 최저가 창을 보여줍니다.
-
-예시:
+항상 현재 직항 최저가 창을 보여줍니다.
 
 ```text
 📊 정기 가격 알림
@@ -99,97 +78,41 @@ Google Flights 직항 왕복가
 Google Flights 검색결과: <검색결과 URL>
 ```
 
-## 슬롯 정책
+## 슬롯
 
-현재 실제 사용 가능 슬롯:
+기본값:
 
 ```text
-SLOT_ACTIVE_LIMIT=5
+SLOT_ACTIVE_LIMIT=10
 ```
 
-현재 릴리스에서는 슬롯 `1~5`까지 사용할 수 있습니다.
-
-내부 slot ID / storage 구조는 `1~10`까지 확장 가능하게 설계되어 있습니다. 향후 `SLOT_ACTIVE_LIMIT`을 늘려도 별도 DB schema migration 없이 확장할 수 있습니다.
+실제 슬롯 `1~10` 총 10개를 사용할 수 있습니다.
 
 - pause: 슬롯 유지
-- delete: 슬롯 번호 해제/재사용
+- delete: 번호 해제/재사용
 - target_price: 필수
-- 검색과 슬롯 변경은 process 내에서 직렬화
 - add마다 `generation` UUID 생성
 - 설정/상태 변경마다 `revision` 증가
 - 검색 저장 시 generation/revision 재검증
 
-## 가격 의미
+DB/schema도 1~10 슬롯을 기본 지원하므로 기존 5슬롯 DB를 그대로 사용해도 별도 schema migration 없이 6~10번 슬롯을 추가할 수 있습니다.
 
-현재 제품 알람에서 쓰는 가격:
-
-```text
-observed_price = Google Flights flight row에 실제 표시된 왕복 가격
-```
-
-DB에는 기존 호환성을 위해 Booking/checkout 관련 column이 남아 있지만, 현재 알람 경로에서는 사용하지 않습니다.
+## 알람 표시 정책
 
 ```text
-price_verified=False
-verification_status=google_flights_displayed_round_trip
+ALERT_NONSTOP_ONLY=true
+ALERT_MAX_OFFERS=4
+REQUIRE_VERIFIED_ALERTS=false
 ```
 
-## Google Flights Provider
+- 경유편 제외
+- 기본 최대 4개 직항 표시
+- 실제 직항이 2개면 2개만 표시
+- 동일 항공편이 DOM에서 중복 노출돼도 사용자 메시지에서는 한 번만 표시
+- 수하물이 확실히 확인되지 않으면 `정보 확인 불가`
+- 사용자에게 주는 URL은 Google Flights 검색결과 1개뿐
 
-Runtime provider:
-
-```text
-src/flight_bot/providers.py
-name = google-playwright-results-observed
-accepted_for_alerts = True
-```
-
-가격은 fast-flights parser에서 가져오지 않습니다. `fast-flights`는 현재 URL builder 용도로만 사용합니다.
-
-Live Windows 테스트에서 확인된 가격 로딩 순서를 runtime에도 반영합니다.
-
-```text
-검색 결과 진입
-→ Cheapest 선택
-→ full refresh 1회
-→ Cheapest selected 상태 재확인
-→ flight-row 가격 수집
-```
-
-page-wide KRW minimum이나 body-wide fallback은 사용하지 않습니다.
-
-## Windows 실시간 acceptance
-
-최초 1회 또는 dependency 변경 후:
-
-```text
-flight-bot - test win\01-setup-and-unit-test.cmd
-```
-
-실시간 테스트:
-
-```text
-flight-bot - test win\02-live-cjj-tpe-visible.cmd
-```
-
-현재 active live probe는 **검색결과 화면에서 끝납니다.** 출국편/귀국편/Booking을 클릭하지 않습니다.
-
-성공 시 핵심 출력:
-
-```text
-=== DIRECT GOOGLE RESULTS ===
-direct_offer_1=...
-direct_offer_2=...
-
-=== SUMMARY ===
-connections_in_alert=0
-booking_navigation_performed=False
-external_checkout_navigation_performed=False
-google_flights_result_url=...
-acceptance=GOOGLE_RESULTS_DIRECT_ONLY_SINGLE_LINK
-```
-
-## 명령어
+## Telegram 명령
 
 ```text
 /flight add CJJ TPE 2026-09-18 2026-09-20 350000
@@ -202,43 +125,116 @@ acceptance=GOOGLE_RESULTS_DIRECT_ONLY_SINGLE_LINK
 /help
 ```
 
-`/flight check`는 수동 조회만 하며 목표가 도달 알림/정기 알림 상태를 발생시키지 않습니다.
+`/flight check`는 수동 조회만 하며 목표가 알림 latch를 소비하지 않습니다.
 
-## 보안
+## Windows 테스트
 
-Production 기본 정책:
+최초 1회:
 
-- Telegram token 설정 시 `TELEGRAM_ALLOWED_CHAT_IDS` 필수
-- Discord token 설정 시 `DISCORD_ALLOWED_CHANNEL_IDS` 필수
-- Kakao secret 설정 시 `KAKAO_ALLOWED_USER_IDS` 필수
-- Kakao secret 없으면 `/kakao/skill` 404
-- Admin secret 없으면 `/admin/check-all` 404
-- Admin/Kakao secret 분리
-- HTTP 기본 bind는 `127.0.0.1`
-- Docker container는 non-root `app` user
+```text
+flight-bot - test win\01-setup-and-unit-test.cmd
+```
+
+실제 Google Flights 가격 acceptance:
+
+```text
+flight-bot - test win\02-live-cjj-tpe-visible.cmd
+```
+
+실제 Telegram 목표가/정기알림 테스트:
+
+```text
+flight-bot - test win\03-notification-test-menu.cmd
+```
+
+`03` 메뉴는 실행 중인 봇이 없으면 **Windows 로컬 실행 또는 Docker Compose 실행**을 선택할 수 있고, 다음을 즉시 테스트할 수 있습니다.
+
+```text
+슬롯 1개 목표가 알림
+슬롯 1개 정기알림
+전체 슬롯 일반 검색
+전체 슬롯 강제 정기알림
+```
+
+정기알림 강제 테스트는 목표가 one-shot 상태를 소비하거나 재무장하지 않습니다.
+
+## 관리자 테스트 API
+
+`ADMIN_SECRET`이 설정된 경우에만 활성화됩니다.
+
+```text
+POST /admin/check-all
+POST /admin/daily-summary
+POST /admin/check-slot/{slot_id}
+POST /admin/daily-summary/{slot_id}
+```
+
+의미:
+
+```text
+/admin/check-slot/1
+→ 슬롯 1 실제 Google 검색
+→ 목표가 조건을 만족하고 ARMED면 목표가 알림 1회
+
+/admin/daily-summary/1
+→ 슬롯 1 실제 Google 검색
+→ 정기알림 즉시 전송
+→ 목표가 latch는 건드리지 않음
+```
+
+모든 admin endpoint는 `X-Flight-Bot-Secret` 헤더가 필요합니다.
 
 ## Docker
 
+`.env` 준비:
+
 ```bash
 cp .env.example .env
+```
+
+최소 Telegram 알림 테스트 설정:
+
+```text
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_ALLOWED_CHAT_IDS=...
+ADMIN_SECRET=긴_랜덤문자열
+```
+
+실행:
+
+```bash
 docker compose up -d --build
 ```
 
-Health endpoint:
+기본 compose는 HTTP를 host loopback에만 노출합니다.
+
+```text
+http://127.0.0.1:8080
+```
+
+중지:
+
+```bash
+docker compose down
+```
+
+Health:
 
 ```text
 GET /health
 ```
 
-주요 health 필드:
+핵심 필드:
 
 ```text
 search_interval_hours=2
 daily_summary_hour=8
 browser_search_storage_isolated=true
-slots_max=5
+slots_max=10
 slots_design_capacity=10
 ```
+
+Docker image는 non-root `app` 사용자로 실행되고 `/data` SQLite volume을 사용합니다.
 
 ## CI
 
@@ -251,4 +247,4 @@ browser-contract
 docker-smoke
 ```
 
-실제 Google 가격은 hosted CI acceptance 값으로 고정하지 않습니다. 실시간 Google UI acceptance는 사용자 Windows 환경에서 visible Edge로 수행합니다.
+Docker smoke는 10슬롯 health 값과 admin 수동 테스트 route가 실제 production image에서 동작하는지까지 확인합니다.
