@@ -4,15 +4,20 @@ services:
     container_name: flight-bot
     restart: unless-stopped
     init: true
+    stop_grace_period: 30s
     env_file:
       - .env
     environment:
       # Container-specific values are pinned here so a .env copied from a
-      # Windows/local test cannot accidentally point Docker at a host path or
-      # try to launch a headed browser without a display server.
+      # Windows/local test cannot accidentally break the headless Ubuntu path.
       DATABASE_PATH: /data/flight_bot.db
       BROWSER_HEADLESS: "true"
+      BROWSER_TIMEOUT_MS: "60000"
+      BROWSER_BLOCK_ASSETS: "false"
       BROWSER_DEBUG_DIR: /debug
+      SEARCH_CONCURRENCY: "${SEARCH_CONCURRENCY:-2}"
+      SEARCH_STAGGER_SECONDS: "${SEARCH_STAGGER_SECONDS:-5}"
+      SLOT_ACTIVE_LIMIT: "10"
       PYTHONUTF8: "1"
       PYTHONIOENCODING: utf-8
     shm_size: "1gb"
@@ -21,10 +26,18 @@ services:
     volumes:
       - flight_bot_data:/data
       - flight_bot_debug:/debug
-    # Safe default: expose only on the host loopback interface. Put an
-    # authenticated reverse proxy in front if a Kakao webhook must be public.
     ports:
       - "127.0.0.1:${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.getenv('HTTP_PORT','8080')+'/health',timeout=4).read()"
+      interval: 30s
+      timeout: 6s
+      start_period: 30s
+      retries: 3
 
 volumes:
   flight_bot_data:
