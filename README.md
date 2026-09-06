@@ -2,7 +2,7 @@
 
 네이버 항공권의 검색 응답을 이용해 **직항 왕복 가격을 감시하고 Telegram/Discord/Kakao 연동 알림을 보내는 self-hosted 봇**입니다.
 
-현재 운영 가격 소스는 **Naver Flights SSE API 하나로 확정**했습니다. 브라우저 자동화, DOM/CSS 파싱, Playwright/Chromium은 사용하지 않습니다.
+현재 운영 가격 소스는 **Naver Flights SSE API 하나로 확정**했습니다. 브라우저 자동화나 DOM/CSS 파싱은 사용하지 않습니다.
 
 ## 확정된 가격 수집 방식
 
@@ -79,7 +79,7 @@ itineraries + fareMappings 결합
 
 ## Docker 실행
 
-브라우저가 없기 때문에 Chromium 이미지나 shared-memory 설정이 필요하지 않습니다.
+브라우저 런타임이나 별도의 shared-memory 설정이 필요하지 않습니다.
 
 ```bash
 cp .env.example .env
@@ -146,7 +146,7 @@ python -m compileall -q src scripts
 docker build -t flight-bot:test .
 ```
 
-CI에서도 단위/계약 테스트와 Docker build를 수행하며, Playwright/Chromium 관련 런타임 파일이나 의존성이 다시 들어오지 않는지 검사합니다.
+CI에서도 단위/계약 테스트, Docker build, 컨테이너 health 확인을 수행하며 브라우저 자동화 런타임이 다시 들어오지 않는지 검사합니다.
 
 ## 현재 아키텍처 경계
 
