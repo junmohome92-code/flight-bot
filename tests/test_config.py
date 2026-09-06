@@ -1,6 +1,7 @@
 import pytest
+from pydantic import ValidationError
 
-from flight_bot.config import SLOT_DESIGN_CAPACITY, Settings
+from flight_bot.config import CURRENT_SLOT_LIMIT, SLOT_DESIGN_CAPACITY, Settings
 
 
 def test_default_search_cadence_daily_summary_and_slot_policy():
@@ -9,7 +10,13 @@ def test_default_search_cadence_daily_summary_and_slot_policy():
     assert settings.scheduled_search_hours == list(range(0, 24, 2))
     assert settings.daily_summary_hour == 8
     assert settings.slot_active_limit == 5
+    assert CURRENT_SLOT_LIMIT == 5
     assert SLOT_DESIGN_CAPACITY == 10
+
+
+def test_runtime_slot_limit_cannot_exceed_current_five_slot_release():
+    with pytest.raises(ValidationError):
+        Settings(slot_active_limit=6)
 
 
 def test_daily_summary_hour_must_reuse_a_scheduled_search():
