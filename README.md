@@ -1,13 +1,8 @@
-# Flight Bot — provider selection POC
+# Flight Bot — Naver Flights E2E POC
 
-현재 단계는 **항공권 가격 소스 선정**입니다.
+현재 단계는 **Naver Flights를 운영 가격 소스로 쓸 수 있는지 Windows에서 실검색 + Telegram 푸시까지 검증**하는 단계입니다.
 
-후보는 두 개입니다.
-
-- Naver Flights
-- Skyscanner
-
-아직 어느 쪽도 운영 Provider로 확정하지 않습니다. 먼저 Windows에서 실제 검색결과 화면을 열고, **직항 왕복 가격을 행 단위로 안정적으로 읽을 수 있는지** 비교합니다.
+Skyscanner는 실제 화면에서 bot challenge가 확인되어 후보에서 제외했습니다.
 
 ## 고정 테스트 조건
 
@@ -21,44 +16,32 @@
 직항만
 ```
 
-두 POC 모두 검색결과까지만 봅니다.
+검색결과까지만 사용합니다.
 
 ```text
-검색결과 화면 열기
-→ 직항 결과 탐색
-→ 화면에 표시된 왕복 가격 수집
-→ 가장 낮은 가격 + 후보 최대 4개 출력
-→ 결과 URL/스크린샷/텍스트 저장
+Naver Flights 검색결과 진입
+→ 화면에 보이는 가격 텍스트 탐색
+→ 가격 주변의 실제 항공편 결과 문맥 확인
+→ 직항 후보 최대 4개 정리
+→ 필요 시 Telegram 테스트 메시지 전송
 → 종료
 ```
 
-예약/결제 단계로 이동하지 않습니다.
+예약/결제 페이지로 이동하지 않습니다.
 
-## Windows — 그냥 BAT 더블클릭
+## Windows 테스트
 
-Naver Flights:
+### 1. Naver 가격 추출만 확인
+
+더블클릭:
 
 ```text
 flight-bot - test win\02-NAVER-flight-test.bat
 ```
 
-Skyscanner:
+최초 실행이면 전용 환경 `.venv-provider-poc`을 자동 생성합니다.
 
-```text
-flight-bot - test win\03-SKYSCANNER-flight-test.bat
-```
-
-최초 실행이라 `.venv-provider-poc`이 없으면 각 BAT가 **POC 전용 환경을 자동 생성**합니다. 기존 운영용 `.venv-win`과 섞지 않습니다. `01`을 먼저 실행할 필요는 없습니다.
-
-수동 준비가 필요할 때만:
-
-```text
-flight-bot - test win\01-setup-and-unit-test.cmd
-```
-
-두 테스트 모두 **설치된 Microsoft Edge를 화면에 보이게 실행**하며 서로 독립적인 Python probe를 사용합니다.
-
-## PASS 기준
+성공 기준:
 
 ```text
 POC_STATUS=PASS
@@ -67,36 +50,74 @@ lowest_visible_direct_price=...
 booking_navigation_performed=False
 ```
 
-실패하면 콘솔 전체를 복사해 주시면 됩니다.
+### 2. Naver → Telegram 실제 푸시 E2E
 
-Naver 자료:
+더블클릭:
+
+```text
+flight-bot - test win\03-NAVER-TELEGRAM-E2E.bat
+```
+
+처음 실행하면 아래 파일을 자동 생성하고 메모장으로 엽니다.
+
+```text
+flight-bot - test win\telegram-test.env
+```
+
+두 값만 입력합니다.
+
+```text
+TELEGRAM_BOT_TOKEN=본인_봇토큰
+TELEGRAM_ALLOWED_CHAT_IDS=본인_CHAT_ID
+```
+
+저장 후 `03-NAVER-TELEGRAM-E2E.bat`를 다시 실행합니다.
+
+E2E 성공 기준:
+
+```text
+E2E_STATUS=PASS
+telegram_message_sent=True
+booking_navigation_performed=False
+```
+
+Telegram에는 `🧪 네이버 항공권 E2E 테스트`로 시작하는 메시지가 실제 전송됩니다. 이 테스트는 첫 번째 Chat ID 한 곳에만 보냅니다.
+
+## 실패 진단 자료
+
+가격 추출 테스트:
 
 ```text
 artifacts\naver-flight-poc\page.png
 artifacts\naver-flight-poc\page.txt
+artifacts\naver-flight-poc\page.html
+artifacts\naver-flight-poc\diagnostics.json
 artifacts\naver-flight-poc\result.json
 ```
 
-Skyscanner 자료:
+Telegram E2E:
 
 ```text
-artifacts\skyscanner-flight-poc\page.png
-artifacts\skyscanner-flight-poc\page.txt
-artifacts\skyscanner-flight-poc\result.json
+artifacts\naver-telegram-e2e\page.png
+artifacts\naver-telegram-e2e\page.txt
+artifacts\naver-telegram-e2e\page.html
+artifacts\naver-telegram-e2e\diagnostics.json
+artifacts\naver-telegram-e2e\result.json
 ```
+
+현재 extractor는 특정 해시 CSS class 하나에 의존하지 않고, 화면에 보이는 가격 텍스트를 시작점으로 실제 항공편 결과 문맥을 찾습니다. iframe과 open shadow root도 함께 검사합니다. 신뢰할 수 있는 결과 행을 못 찾으면 Telegram을 보내지 않습니다.
 
 ## 다음 단계
 
-두 POC 결과를 비교한 뒤 한 소스를 Primary로 선정합니다.
-
-선정 후에만:
+Windows에서 `03-NAVER-TELEGRAM-E2E.bat`까지 통과하면:
 
 ```text
-운영 Provider 통합
-→ Telegram 슬롯 등록 UX 개선
-→ 목표가 푸시알림 E2E
-→ 10슬롯 / 최대 2개 동시검색 검증
-→ Ubuntu Docker 배포
+Naver 운영 Provider 통합
+→ Telegram 등록 UX 개선
+→ 목표가 1회 알림 + 일일 요약
+→ 10슬롯 / 최대 2개 동시검색
+→ Ubuntu Docker 실검색 검증
+→ main 병합
 ```
 
-으로 넘어갑니다.
+순서로 진행합니다.
