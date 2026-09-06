@@ -24,6 +24,7 @@ HELP = """항공권 감시봇 명령어
 감시 슬롯은 1~10번까지 총 10개를 사용할 수 있습니다.
 pause 상태도 슬롯을 차지합니다.
 가격 검색은 2시간 주기이며 각 검색은 새 브라우저 저장공간으로 격리합니다.
+전체 검색은 동시에 최대 2개 슬롯만 실행하고 시작 시점을 조금씩 분산합니다.
 알림 후보는 Google Flights 왕복 검색의 직항만 사용하며 경유편은 제외합니다.
 목표가 도달 알림은 목표가 설정당 최초 1회만 전송합니다.
 그 이후에는 하루 1회 정기 가격 알림에서 최신 직항 최저가 창을 보여줍니다.
@@ -38,8 +39,12 @@ class FlightService:
         self.db = db
         self.provider = provider or GoogleFlightsPlaywrightProvider(settings)
         self.notifier = None
-        self._operation_lock = asyncio.Lock()
+        self._mutation_lock = asyncio.Lock()
+        self._slot_locks: dict[int, asyncio.Lock] = {}
+        self._search_semaphore = asyncio.Semaphore(settings.search_concurrency)
+        self._scan_lock = asyncio.Lock()
         self._scan_active = False
+        self._active_searches = 0
 
     def set_notifier(self, notifier) -> None:
         self.notifier = notifier
@@ -47,6 +52,17 @@ class FlightService:
     @property
     def scan_active(self) -> bool:
         return self._scan_active
+
+    @property
+    def active_searches(self) -> int:
+        return self._active_searches
+
+    def _slot_lock(self, slot_id: int) -> asyncio.Lock:
+        lock = self._slot_locks.get(slot_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._slot_locks[slot_id] = lock
+        return lock
 
     @staticmethod
     def format_slot(slot: WatchSlot) -> str:
@@ -58,13 +74,6 @@ class FlightService:
         )
 
     def format_offer(self, slot: WatchSlot, offer: FlightOffer) -> str:
-        """Format one result-page message with exactly one user-facing URL.
-
-        Google can expose the same physical row through both an aria-label and
-        visible text with tiny whitespace differences. De-duplicate those
-        semantically before applying the configured display limit so the daily
-        Cheapest window never wastes a slot on the same flight twice.
-        """
         raw_rows = list(offer.display_offers or [])
         rows: list[dict] = []
         seen_rows: set[tuple] = set()
@@ -75,13 +84,8 @@ class FlightService:
                 continue
             airline = re.sub(r"\s+", " ", str(row.get("airline") or "").strip()).lower()
             times_value = row.get("times") or []
-            times = tuple(
-                re.sub(r"\s+", " ", str(value).strip()).lower()
-                for value in times_value
-            ) if isinstance(times_value, list) else ()
-            flight_numbers = re.sub(
-                r"\s+", "", str(row.get("flight_numbers") or "").upper()
-            )
+            times = tuple(re.sub(r"\s+", " ", str(value).strip()).lower() for value in times_value) if isinstance(times_value, list) else ()
+            flight_numbers = re.sub(r"\s+", "", str(row.get("flight_numbers") or "").upper())
             key = (price, airline, times, flight_numbers)
             if key in seen_rows:
                 continue
@@ -91,15 +95,13 @@ class FlightService:
                 break
 
         if not rows:
-            rows = [
-                {
-                    "price": offer.observed_price,
-                    "airline": offer.airline,
-                    "flight_numbers": offer.outbound_flight,
-                    "times": [],
-                    "nonstop": offer.nonstop,
-                }
-            ]
+            rows = [{
+                "price": offer.observed_price,
+                "airline": offer.airline,
+                "flight_numbers": offer.outbound_flight,
+                "times": [],
+                "nonstop": offer.nonstop,
+            }]
 
         price_lines: list[str] = []
         for index, row in enumerate(rows, start=1):
@@ -146,10 +148,6 @@ class FlightService:
     def _valid_airport(value: str) -> bool:
         return bool(_AIRPORT_RE.fullmatch((value or "").strip().upper()))
 
-    @staticmethod
-    def _same_owner(slot: WatchSlot, platform: str, owner_id: str) -> bool:
-        return slot.owner_platform == platform and slot.owner_id == owner_id
-
     async def close(self) -> None:
         close = getattr(self.provider, "close", None)
         if close is None:
@@ -158,27 +156,26 @@ class FlightService:
         if inspect.isawaitable(result):
             await result
 
-    async def check_slot(
-        self,
-        slot_id: int,
-        *,
-        notify_target: bool = False,
-        notify_daily_summary: bool = False,
-    ) -> str:
-        async with self._operation_lock:
-            return await self._check_slot_locked(
-                slot_id,
-                notify_target=notify_target,
-                notify_daily_summary=notify_daily_summary,
-            )
+    async def _run_slot_search(self, slot_id: int, *, notify_target: bool, notify_daily_summary: bool) -> str:
+        async with self._search_semaphore:
+            self._active_searches += 1
+            try:
+                return await self._check_slot_locked(slot_id, notify_target=notify_target, notify_daily_summary=notify_daily_summary)
+            finally:
+                self._active_searches -= 1
 
-    async def _check_slot_locked(
-        self,
-        slot_id: int,
-        *,
-        notify_target: bool,
-        notify_daily_summary: bool = False,
-    ) -> str:
+    async def check_slot(self, slot_id: int, *, notify_target: bool = False, notify_daily_summary: bool = False) -> str:
+        async with self._slot_lock(slot_id):
+            return await self._run_slot_search(slot_id, notify_target=notify_target, notify_daily_summary=notify_daily_summary)
+
+    async def _check_owned_slot(self, slot_id: int, platform: str, owner_id: str) -> str:
+        async with self._slot_lock(slot_id):
+            slot = self.db.get_owned_slot(slot_id, platform, owner_id)
+            if not slot:
+                return f"슬롯 #{slot_id}을 찾을 수 없거나 이 대화에서 만든 슬롯이 아닙니다."
+            return await self._run_slot_search(slot_id, notify_target=False, notify_daily_summary=False)
+
+    async def _check_slot_locked(self, slot_id: int, *, notify_target: bool, notify_daily_summary: bool = False) -> str:
         slot = self.db.get_slot(slot_id)
         if not slot:
             return f"슬롯 #{slot_id}을 찾을 수 없습니다."
@@ -196,43 +193,19 @@ class FlightService:
             return f"조회 실패: 예상하지 못한 오류 ({type(exc).__name__})"
 
         try:
-            self.db.save_offer(
-                slot.id,
-                offer,
-                expected_generation=slot.generation,
-                expected_revision=slot.revision,
-            )
+            self.db.save_offer(slot.id, offer, expected_generation=slot.generation, expected_revision=slot.revision)
         except StaleSlotError as exc:
             self.db.finish_search(run_id, status="stale", message=str(exc)[:500])
             return "조회 중 슬롯 설정이 변경되어 이전 검색 결과를 폐기했습니다."
 
-        self.db.finish_search(
-            run_id,
-            status="success",
-            message=(
-                f"observed={offer.observed_price}; verified={offer.verified_price}; "
-                f"verification_status={offer.verification_status}"
-            )[:500],
-        )
+        self.db.finish_search(run_id, status="success", message=(f"observed={offer.observed_price}; verified={offer.verified_price}; verification_status={offer.verification_status}")[:500])
 
-        effective_price = (
-            offer.verified_price
-            if offer.price_verified and offer.verified_price is not None
-            else offer.observed_price
-        )
+        effective_price = offer.verified_price if offer.price_verified and offer.verified_price is not None else offer.observed_price
         below_target = effective_price <= slot.target_price
-        alert_eligible = provider_alert_capable and (
-            offer.price_verified or not self.settings.require_verified_alerts
-        )
+        alert_eligible = provider_alert_capable and (offer.price_verified or not self.settings.require_verified_alerts)
         target_alert_sent = False
 
-        if (
-            below_target
-            and notify_target
-            and slot.alert_state == ALERT_ARMED
-            and alert_eligible
-            and self.notifier
-        ):
+        if below_target and notify_target and slot.alert_state == ALERT_ARMED and alert_eligible and self.notifier:
             try:
                 self.db.set_alert_state(slot.id, ALERT_SENDING, alerted_price=effective_price)
                 pending_slot = self.db.get_slot(slot.id) or slot
@@ -245,11 +218,7 @@ class FlightService:
                 return self.format_offer(slot, offer) + f"\n알림 준비 실패: {type(exc).__name__}"
 
             try:
-                await self.notifier.send(
-                    slot.owner_platform,
-                    slot.owner_id,
-                    "🔥 목표가 도달\n" + self.format_offer(slot, offer),
-                )
+                await self.notifier.send(slot.owner_platform, slot.owner_id, "🔥 목표가 도달\n" + self.format_offer(slot, offer))
             except Exception as exc:
                 self.db.finish_alert(alert_id, state="FAILED", error=f"{type(exc).__name__}: {exc}"[:500])
                 self.db.set_alert_state(slot.id, ALERT_ARMED)
@@ -260,48 +229,33 @@ class FlightService:
                 self.db.set_alert_state(slot.id, ALERTED, alerted_price=effective_price)
                 target_alert_sent = True
             except Exception:
-                return (
-                    self.format_offer(slot, offer)
-                    + "\n알림은 전송됐지만 상태 저장을 확인하지 못했습니다. 중복 방지를 위해 SENDING 상태를 유지합니다."
-                )
+                return self.format_offer(slot, offer) + "\n알림은 전송됐지만 상태 저장을 확인하지 못했습니다. 중복 방지를 위해 SENDING 상태를 유지합니다."
 
         if notify_daily_summary and self.notifier and not target_alert_sent:
             try:
-                await self.notifier.send(
-                    slot.owner_platform,
-                    slot.owner_id,
-                    "📊 정기 가격 알림\n" + self.format_offer(slot, offer),
-                )
+                await self.notifier.send(slot.owner_platform, slot.owner_id, "📊 정기 가격 알림\n" + self.format_offer(slot, offer))
             except Exception as exc:
                 return self.format_offer(slot, offer) + f"\n정기 알림 전송 실패: {type(exc).__name__}"
 
         return self.format_offer(slot, offer)
 
-    async def check_all(
-        self,
-        *,
-        notify_target: bool = True,
-        notify_daily_summary: bool = False,
-    ) -> bool:
-        """Scan every enabled slot.
-
-        Scheduled operation keeps ``notify_target=True``. Admin/manual tests may
-        disable target alerts while forcing the daily summary so a user can
-        verify the regular message without consuming the one-shot target latch.
-        """
-        if self._scan_active:
+    async def check_all(self, *, notify_target: bool = True, notify_daily_summary: bool = False) -> bool:
+        if self._scan_lock.locked():
             return False
-        self._scan_active = True
-        try:
-            for slot in self.db.list_slots(enabled_only=True):
-                await self.check_slot(
-                    slot.id,
-                    notify_target=notify_target,
-                    notify_daily_summary=notify_daily_summary,
-                )
-            return True
-        finally:
-            self._scan_active = False
+        async with self._scan_lock:
+            self._scan_active = True
+            try:
+                slots = self.db.list_slots(enabled_only=True)
+                tasks: list[asyncio.Task[str]] = []
+                for index, slot in enumerate(slots):
+                    tasks.append(asyncio.create_task(self.check_slot(slot.id, notify_target=notify_target, notify_daily_summary=notify_daily_summary)))
+                    if index < len(slots) - 1 and self.settings.search_stagger_seconds:
+                        await asyncio.sleep(self.settings.search_stagger_seconds)
+                if tasks:
+                    await asyncio.gather(*tasks)
+                return True
+            finally:
+                self._scan_active = False
 
     async def command(self, platform: str, owner_id: str, text: str) -> str:
         text = (text or "").strip()
@@ -331,19 +285,9 @@ class FlightService:
                 target = int(parts[6].replace(",", ""))
             except ValueError:
                 return "목표가는 숫자로 입력해 주세요. 예: 350000"
-            async with self._operation_lock:
+            async with self._mutation_lock:
                 try:
-                    slot = self.db.add_slot(
-                        platform=platform,
-                        owner_id=owner_id,
-                        origin=origin,
-                        destination=destination,
-                        depart_date=parts[4],
-                        return_date=parts[5],
-                        target_price=target,
-                        nonstop=True,
-                        checked_bag=0,
-                    )
+                    slot = self.db.add_slot(platform=platform, owner_id=owner_id, origin=origin, destination=destination, depart_date=parts[4], return_date=parts[5], target_price=target, nonstop=True, checked_bag=0)
                 except ValueError as exc:
                     return str(exc)
             return "감시 슬롯을 추가했습니다.\n" + self.format_slot(slot)
@@ -360,14 +304,15 @@ class FlightService:
                 price = int(parts[3].replace(",", ""))
             except ValueError:
                 return "목표가는 숫자로 입력해 주세요."
-            async with self._operation_lock:
-                slot = self.db.get_owned_slot(slot_id, platform, owner_id)
-                if not slot:
-                    return f"슬롯 #{slot_id}을 찾을 수 없거나 이 대화에서 만든 슬롯이 아닙니다."
-                try:
-                    self.db.set_target(slot_id, price)
-                except ValueError as exc:
-                    return str(exc)
+            async with self._slot_lock(slot_id):
+                async with self._mutation_lock:
+                    slot = self.db.get_owned_slot(slot_id, platform, owner_id)
+                    if not slot:
+                        return f"슬롯 #{slot_id}을 찾을 수 없거나 이 대화에서 만든 슬롯이 아닙니다."
+                    try:
+                        self.db.set_target(slot_id, price)
+                    except ValueError as exc:
+                        return str(exc)
             return f"슬롯 #{slot_id} 목표가를 {price:,}KRW로 변경했습니다. 목표가 도달 알림 1회를 다시 활성화했습니다."
 
         if action in {"check", "pause", "resume", "delete"}:
@@ -375,26 +320,19 @@ class FlightService:
                 return f"형식: /flight {action} <슬롯번호>"
             slot_id = int(parts[2])
             if action == "check":
-                async with self._operation_lock:
+                return await self._check_owned_slot(slot_id, platform, owner_id)
+
+            async with self._slot_lock(slot_id):
+                async with self._mutation_lock:
                     slot = self.db.get_owned_slot(slot_id, platform, owner_id)
                     if not slot:
                         return f"슬롯 #{slot_id}을 찾을 수 없거나 이 대화에서 만든 슬롯이 아닙니다."
-                    return await self._check_slot_locked(
-                        slot_id,
-                        notify_target=False,
-                        notify_daily_summary=False,
-                    )
-
-            async with self._operation_lock:
-                slot = self.db.get_owned_slot(slot_id, platform, owner_id)
-                if not slot:
-                    return f"슬롯 #{slot_id}을 찾을 수 없거나 이 대화에서 만든 슬롯이 아닙니다."
-                if action == "pause":
-                    self.db.set_enabled(slot_id, False)
-                    return f"슬롯 #{slot_id} 감시를 일시정지했습니다. 슬롯은 계속 점유합니다."
-                if action == "resume":
-                    self.db.set_enabled(slot_id, True)
-                    return f"슬롯 #{slot_id} 감시를 재개했습니다."
-                self.db.delete_slot(slot_id)
-                return f"슬롯 #{slot_id}을 삭제했습니다. 이 번호는 다음 add에서 다시 사용됩니다."
+                    if action == "pause":
+                        self.db.set_enabled(slot_id, False)
+                        return f"슬롯 #{slot_id} 감시를 일시정지했습니다. 슬롯은 계속 점유합니다."
+                    if action == "resume":
+                        self.db.set_enabled(slot_id, True)
+                        return f"슬롯 #{slot_id} 감시를 재개했습니다."
+                    self.db.delete_slot(slot_id)
+                    return f"슬롯 #{slot_id}을 삭제했습니다. 이 번호는 다음 add에서 다시 사용됩니다."
         return HELP
