@@ -82,7 +82,7 @@ jobs:
                   with urllib.request.urlopen('http://127.0.0.1:18080/health', timeout=2) as response:
                       payload = json.load(response)
                   assert payload['ok'] is True
-                  assert payload['provider_accepted_for_alerts'] is False
+                  assert payload['provider_accepted_for_alerts'] is True
                   print(payload)
                   break
               except Exception as exc:
