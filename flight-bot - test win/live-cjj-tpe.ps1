@@ -23,26 +23,26 @@ $env:BROWSER_PROFILE_DIR = (Join-Path $RepoRoot 'artifacts\google-profile-win')
 $env:BROWSER_KEEP_OPEN_SECONDS = if ($Headless) { '0' } else { '8' }
 $env:GOOGLE_UI_SELECTION_WAIT_MS = '20000'
 $env:GOOGLE_UI_BOOKING_WAIT_MS = '15000'
-$env:GOOGLE_UI_DEPARTURE_CAPTURE_MS = '900'
+$env:GOOGLE_UI_DEPARTURE_CAPTURE_MS = '1500'
 $env:GOOGLE_UI_RETURN_CAPTURE_MS = '650'
 
-# Acceptance-only speed-up. The active probe will use its canonical Cheapest
-# tfu URL for this fixed route/date scenario. Production search remains dynamic.
+# Fixed route/date bootstrap only. This is the unsorted search URL on purpose:
+# the active probe must find and CLICK Cheapest/최저가 itself and confirm that
+# the tab is selected. We no longer assume that a tfu URL means Cheapest.
 $env:GOOGLE_UI_SEARCH_URL = 'https://www.google.com/travel/flights/search?tfs=CBwQAhoeEgoyMDI2LTA5LTE4agcIARIDQ0pKcgcIARIDVFBFGh4SCjIwMjYtMDktMjBqBwgBEgNUUEVyBwgBEgNDSkpAAUgBcAGCAQsI____________AZgBAQ&hl=en&gl=kr&curr=KRW'
-
-# Do not use the user's personal Edge/Chrome profile.
-Remove-Item Env:BROWSER_CHANNEL -ErrorAction SilentlyContinue
 Remove-Item Env:GOOGLE_UI_CHEAPEST_URL -ErrorAction SilentlyContinue
+Remove-Item Env:BROWSER_CHANNEL -ErrorAction SilentlyContinue
 
-Write-Host 'Google Flights preserved transient snapshot + pointer Booking probe'
+Write-Host 'Google Flights explicit Cheapest-tab + transient snapshot + Booking probe'
 Write-Host '  CJJ -> TPE -> CJJ'
 Write-Host '  2026-09-18 ~ 2026-09-20'
 Write-Host '  1 adult / Economy / KRW'
-Write-Host '  disappearing cheapest snapshot preserved: YES'
-Write-Host '  advertised Cheapest guard: YES'
-Write-Host '  expensive stable fallback above advertised price: NO'
-Write-Host '  returning route token may be omitted after Returning flights marker: YES'
-Write-Host '  real Playwright mouse click: YES'
+Write-Host '  actual Cheapest/최저가 click: YES'
+Write-Host '  aria-selected confirmation: YES'
+Write-Host '  pre-Cheapest Best-tab prices ignored: YES'
+Write-Host '  disappearing cheapest snapshots preserved: YES'
+Write-Host '  loading one-row premature selection: NO'
+Write-Host '  return adjustment can be +₩0: YES'
 Write-Host '  external seller checkout verification: NO'
 Write-Host '  body-wide price fallback: NO'
 Write-Host "  departure capture window: $($env:GOOGLE_UI_DEPARTURE_CAPTURE_MS) ms"
@@ -59,4 +59,4 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ''
 Write-Host 'Probe complete.'
-Write-Host 'Paste the departure/return/Booking output and SUMMARY into the next ChatGPT chat.'
+Write-Host 'Paste the Cheapest/departure/return/Booking output and SUMMARY into the next ChatGPT chat.'
