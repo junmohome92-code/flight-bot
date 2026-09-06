@@ -10,49 +10,56 @@ permissions:
   contents: read
 
 jobs:
-  unit-linux:
+  poc-contract-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -c constraints.txt -e '.[dev]'
-      - run: python -m compileall -q src scripts tests
-      - run: pytest -q
+      - name: Install only provider POC dependencies
+        run: python -m pip install -r provider-poc-requirements.txt
+      - name: Compile standalone provider probes and contract tests
+        run: >-
+          python -m compileall -q
+          scripts/naver_flight_probe.py
+          scripts/skyscanner_flight_probe.py
+          tests/test_provider_poc.py
+          tests/test_windows_test_harness.py
+      - name: Run provider POC contracts
+        run: pytest -q tests/test_provider_poc.py tests/test_windows_test_harness.py
       - name: Verify retired Google POC assets are absent
         shell: bash
         run: |
           set -euo pipefail
           test -z "$(find scripts -maxdepth 1 -type f -name 'google_*' -print -quit)"
+          test -z "$(find tests -maxdepth 1 -type f -name 'test_google_*' -print -quit)"
           test ! -e 'flight-bot - test win/02-live-cjj-tpe-visible.cmd'
           test ! -e 'flight-bot - test win/03-notification-test-menu.cmd'
+          test ! -e 'flight-bot - test win/live-cjj-tpe.ps1'
           test ! -e 'flight-bot - test win/notification-test-menu.ps1'
           test -e 'flight-bot - test win/02-NAVER-flight-test.bat'
           test -e 'flight-bot - test win/03-SKYSCANNER-flight-test.bat'
 
-  unit-windows:
+  poc-windows-edge:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install -c constraints.txt -e '.[dev]'
-      - run: python -m compileall -q src scripts tests
-      - run: python -m pytest -q
+      - name: Install only provider POC dependencies
+        run: python -m pip install -r provider-poc-requirements.txt
+      - name: Compile standalone provider probes and contract tests
+        run: >-
+          python -m compileall -q
+          scripts/naver_flight_probe.py
+          scripts/skyscanner_flight_probe.py
+          tests/test_provider_poc.py
+          tests/test_windows_test_harness.py
+      - name: Run provider POC contracts
+        run: python -m pytest -q tests/test_provider_poc.py tests/test_windows_test_harness.py
       - name: Verify installed Microsoft Edge can be launched by Playwright
         shell: pwsh
         run: |
           python -c "import asyncio; from playwright.async_api import async_playwright; exec('async def t():\n    p=await async_playwright().start()\n    b=await p.chromium.launch(channel=\"msedge\", headless=True)\n    print(\"Edge via Playwright:\", b.version)\n    await b.close()\n    await p.stop()\nasyncio.run(t())')"
-
-  poc-contract:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -c constraints.txt -e '.[dev]'
-      - name: Verify independent provider URL contracts
-        run: pytest -q tests/test_provider_poc.py tests/test_windows_test_harness.py
