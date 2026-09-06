@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from flight_bot.config import Settings
 from flight_bot.models import WatchSlot
 from flight_bot.runtime_results_provider import RuntimeGoogleResultsProvider
@@ -102,6 +104,7 @@ def _slot():
     )
 
 
+@pytest.mark.asyncio
 async def test_runtime_search_uses_accepted_cheapest_refresh_order():
     trace = []
     provider = _TraceProvider(Settings(_env_file=None), trace)
