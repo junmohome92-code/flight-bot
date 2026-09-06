@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main, codex/playwright-v2]
+    branches: [main, "poc/**"]
   pull_request:
   workflow_dispatch:
 
@@ -20,6 +20,16 @@ jobs:
       - run: pip install -c constraints.txt -e '.[dev]'
       - run: python -m compileall -q src scripts tests
       - run: pytest -q
+      - name: Verify retired Google POC assets are absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(find scripts -maxdepth 1 -type f -name 'google_*' -print -quit)"
+          test ! -e 'flight-bot - test win/02-live-cjj-tpe-visible.cmd'
+          test ! -e 'flight-bot - test win/03-notification-test-menu.cmd'
+          test ! -e 'flight-bot - test win/notification-test-menu.ps1'
+          test -e 'flight-bot - test win/02-NAVER-flight-test.bat'
+          test -e 'flight-bot - test win/03-SKYSCANNER-flight-test.bat'
 
   unit-windows:
     runs-on: windows-latest
@@ -31,41 +41,12 @@ jobs:
       - run: python -m pip install -c constraints.txt -e '.[dev]'
       - run: python -m compileall -q src scripts tests
       - run: python -m pytest -q
-      - name: Parse notification menu with Windows PowerShell 5.1
-        shell: powershell
-        run: |
-          $path = 'flight-bot - test win/notification-test-menu.ps1'
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path $path), [ref]$tokens, [ref]$errors
-          ) | Out-Null
-          if ($errors.Count -gt 0) {
-            $errors | Format-List | Out-String | Write-Error
-            exit 1
-          }
-          Write-Host "Windows PowerShell parser OK: $($PSVersionTable.PSVersion)"
-      - name: Parse notification menu with PowerShell 7
+      - name: Verify installed Microsoft Edge can be launched by Playwright
         shell: pwsh
         run: |
-          $path = 'flight-bot - test win/notification-test-menu.ps1'
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path $path), [ref]$tokens, [ref]$errors
-          ) | Out-Null
-          if ($errors.Count -gt 0) {
-            $errors | Format-List | Out-String | Write-Error
-            exit 1
-          }
-          Write-Host "PowerShell 7 parser OK: $($PSVersionTable.PSVersion)"
-      - name: Verify Windows Playwright Chromium install and launch
-        shell: pwsh
-        run: |
-          python -m playwright install chromium
-          python -c "import asyncio; from playwright.async_api import async_playwright; exec('async def t():\n    p=await async_playwright().start()\n    b=await p.chromium.launch(headless=True)\n    print(b.version)\n    await b.close()\n    await p.stop()\nasyncio.run(t())')"
+          python -c "import asyncio; from playwright.async_api import async_playwright; exec('async def t():\n    p=await async_playwright().start()\n    b=await p.chromium.launch(channel=\"msedge\", headless=True)\n    print(\"Edge via Playwright:\", b.version)\n    await b.close()\n    await p.stop()\nasyncio.run(t())')"
 
-  browser-contract:
+  poc-contract:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -73,95 +54,5 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -c constraints.txt -e '.[dev]'
-      - name: Install Chromium for synthetic lifecycle test
-        run: python -m playwright install --with-deps chromium
-      - name: Verify canonical one-tab Cheapest-first refresh and navigation safety
-        env:
-          RUN_BROWSER_CONTRACT_TESTS: "1"
-        run: >-
-          pytest -q
-          tests/test_google_acceptance_structure.py
-          tests/test_google_browser_contract.py
-          tests/test_google_cheapest_selection.py
-          tests/test_google_departure_transition.py
-          tests/test_google_price_unavailable_recovery.py
-          tests/test_google_return_phase_boundary.py
-          tests/test_runtime_results_provider.py
-
-  docker-smoke:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Validate Compose production contract
-        shell: bash
-        run: |
-          cp .env.example .env
-          ADMIN_SECRET=ci-secret docker compose config >/tmp/compose-rendered.yaml
-          grep -q 'DATABASE_PATH: /data/flight_bot.db' /tmp/compose-rendered.yaml
-          grep -q 'BROWSER_HEADLESS: "true"' /tmp/compose-rendered.yaml || grep -q 'BROWSER_HEADLESS: true' /tmp/compose-rendered.yaml
-          grep -q 'BROWSER_DEBUG_DIR: /debug' /tmp/compose-rendered.yaml
-      - name: Build production image
-        run: docker build -t flight-bot-ci .
-      - name: Run container and verify health/admin test surface
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker run -d --name flight-bot-ci \
-            -e ADMIN_SECRET=ci-secret \
-            -p 127.0.0.1:18080:8080 \
-            flight-bot-ci
-          trap 'docker logs flight-bot-ci || true; docker rm -f flight-bot-ci >/dev/null 2>&1 || true' EXIT
-          python - <<'PY'
-          import json
-          import time
-          import urllib.request
-
-          base = 'http://127.0.0.1:18080'
-          last = None
-          for _ in range(40):
-              try:
-                  with urllib.request.urlopen(base + '/health', timeout=2) as response:
-                      payload = json.load(response)
-                  assert payload['ok'] is True
-                  assert payload['provider'] == 'google-playwright-results-observed-accepted-flow'
-                  assert payload['provider_accepted_for_alerts'] is True
-                  assert payload['search_interval_hours'] == 2
-                  assert payload['daily_summary_hour'] == 8
-                  assert payload['browser_search_storage_isolated'] is True
-                  assert payload['cheapest_selected_full_reload'] is True
-                  assert payload['price_unavailable_recovery_reloads'] == 2
-                  assert payload['slots_max'] == 10
-                  assert payload['slots_design_capacity'] == 10
-                  assert payload['admin_endpoint_enabled'] is True
-                  print(payload)
-                  break
-              except Exception as exc:
-                  last = exc
-                  time.sleep(0.5)
-          else:
-              raise SystemExit(f'health endpoint did not become ready: {last}')
-
-          def post(path):
-              request = urllib.request.Request(
-                  base + path,
-                  data=b'',
-                  method='POST',
-                  headers={'X-Flight-Bot-Secret': 'ci-secret'},
-              )
-              with urllib.request.urlopen(request, timeout=10) as response:
-                  return json.load(response)
-
-          target = post('/admin/check-slot/10')
-          assert target['accepted'] is True
-          assert target['mode'] == 'target-check-slot'
-          assert target['slot_id'] == 10
-          assert '찾을 수 없습니다' in target['result']
-
-          summary = post('/admin/daily-summary/10')
-          assert summary['accepted'] is True
-          assert summary['mode'] == 'daily-summary-slot'
-          assert summary['target_alerts'] is False
-          assert summary['slot_id'] == 10
-          assert '찾을 수 없습니다' in summary['result']
-          PY
-          test "$(docker inspect --format='{{.Config.User}}' flight-bot-ci)" = "app"
+      - name: Verify independent provider URL contracts
+        run: pytest -q tests/test_provider_poc.py tests/test_windows_test_harness.py
