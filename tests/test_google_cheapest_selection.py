@@ -12,7 +12,7 @@ from playwright.async_api import async_playwright
 # the acceptance probe directly from the repository.
 _SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(_SCRIPTS_DIR))
-from google_booking_pointer_probe_v5 import capture_state_v5, select_cheapest_tab_v5  # noqa: E402
+from google_booking_pointer_probe_v6 import capture_state_v6, select_cheapest_tab_v6  # noqa: E402
 
 
 pytestmark = pytest.mark.skipif(
@@ -22,7 +22,7 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.asyncio
-async def test_cheapest_radio_replacement_is_requeried_and_stamped():
+async def test_cheapest_radio_replacement_is_requeried_and_click_boundary_stamped():
     playwright = await async_playwright().start()
     browser = await playwright.chromium.launch(headless=True)
     page = await browser.new_page()
@@ -66,7 +66,7 @@ document.getElementById('cheap').addEventListener('click', () => {
 </body></html>"""
         )
 
-        selected = await select_cheapest_tab_v5(page, 3000)
+        selected = await select_cheapest_tab_v6(page, 3000)
         assert selected["selectedBy"] == "aria-checked"
         assert selected["role"] == "radio"
         assert "311,811" in selected["text"]
@@ -75,6 +75,7 @@ document.getElementById('cheap').addEventListener('click', () => {
         assert capture["cheapestSelected"] is True
         assert capture["advertisedPrice"] == 311811
         assert capture["cheapestSelectionEvidence"] == "aria-checked"
+        assert float(capture["cheapestClickStartedAtMs"]) > 0
     finally:
         await browser.close()
         await playwright.stop()
@@ -95,6 +96,7 @@ window.__flightBotCaptureV4 = {
   phase: 'departure',
   phaseStartedAtMs: performance.now(),
   cheapestRequestedAtMs: performance.now(),
+  cheapestClickStartedAtMs: performance.now(),
   cheapestSelected: false,
   cheapestSelectedAtMs: null,
   cheapestText: '',
@@ -112,14 +114,15 @@ window.__flightBotCaptureV4 = {
 </body></html>"""
         )
 
-        first = await capture_state_v5(page)
+        first = await capture_state_v6(page)
         assert first["cheapestSelected"] is True
         assert first["advertisedPrice"] == 311811
         assert first["cheapestSelectionEvidence"] == "aria-checked"
+        assert float(first["cheapestClickStartedAtMs"]) > 0
 
         await page.locator("#cheap").evaluate("el => { el.textContent = 'Cheapest from ₩299,900'; }")
         await page.wait_for_timeout(120)
-        second = await capture_state_v5(page)
+        second = await capture_state_v6(page)
         assert second["advertisedPrice"] == 299900
     finally:
         await browser.close()

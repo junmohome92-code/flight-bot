@@ -14,7 +14,6 @@ if ($Headless) {
     throw 'The current Google acceptance probe requires a visible native Edge window. Use 02-live-cjj-tpe-visible.cmd.'
 }
 
-# Keep Korean/₩ diagnostics readable in Windows console.
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
 try { chcp 65001 > $null } catch { }
@@ -29,11 +28,8 @@ $env:GOOGLE_UI_BOOKING_WAIT_MS = '15000'
 $env:GOOGLE_UI_DEPARTURE_CAPTURE_MS = '3500'
 $env:GOOGLE_UI_RETURN_CAPTURE_MS = '900'
 
-# Fixed acceptance route only. This is a normal search URL, not a pre-selected
-# tfu Cheapest URL. The probe must click Cheapest/최저가 itself.
 $env:GOOGLE_UI_SEARCH_URL = 'https://www.google.com/travel/flights/search?tfs=CBwQAhoeEgoyMDI2LTA5LTE4agcIARIDQ0pKcgcIARIDVFBFGh4SCjIwMjYtMDktMjBqBwgBEgNUUEVyBwgBEgNDSkpAAUgBcAGCAQsI____________AZgBAQ&hl=en&gl=kr&curr=KRW'
 
-# Do not attach to the user's personal Edge/Chrome profile.
 Remove-Item Env:BROWSER_CHANNEL -ErrorAction SilentlyContinue
 Remove-Item Env:GOOGLE_UI_CHEAPEST_URL -ErrorAction SilentlyContinue
 
@@ -44,6 +40,8 @@ Write-Host '  1 adult / Economy / KRW'
 Write-Host '  observer active before Cheapest click: YES'
 Write-Host '  text-node mutation capture: YES'
 Write-Host '  explicit Cheapest/최저가 click: YES'
+Write-Host '  actual pointer-event boundary: YES'
+Write-Host '  delayed selected-state cannot discard post-click transient rows: YES'
 Write-Host '  fresh post-click control re-query: YES'
 Write-Host '  strong selected-state evidence: aria-selected/pressed/checked/current/data-state'
 Write-Host '  candidate + advertised stability gate: YES'
@@ -58,7 +56,7 @@ Write-Host "  selection wait: $($env:GOOGLE_UI_SELECTION_WAIT_MS) ms"
 Write-Host "  booking wait: $($env:GOOGLE_UI_BOOKING_WAIT_MS) ms"
 Write-Host ''
 
-& $VenvPython 'scripts\google_booking_pointer_probe_v5.py'
+& $VenvPython 'scripts\google_booking_pointer_probe_v6.py'
 if ($LASTEXITCODE -ne 0) {
     throw "Google UI navigation-safe booking probe failed with exit code $LASTEXITCODE. Check artifacts\google-ui-win."
 }
