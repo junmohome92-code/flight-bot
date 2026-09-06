@@ -184,7 +184,7 @@ Write-Host 'Before testing an empty DB, send this in Telegram:' -ForegroundColor
 Write-Host '/flight add CJJ TPE 2026-09-18 2026-09-20 999999'
 Write-Host 'Use a high target such as 999999 to make the first target-alert test easy.'
 
-while ($true) {
+:MenuLoop while ($true) {
     Write-Host ''
     Write-Host '1. Health / slot status'
     Write-Host '2. Test TARGET alert for one slot (real Google search)'
@@ -233,7 +233,7 @@ while ($true) {
                 Write-Host '/flight delete 1'
             }
             '0' {
-                break
+                break MenuLoop
             }
             default {
                 Write-Host 'Unknown selection.' -ForegroundColor Yellow
