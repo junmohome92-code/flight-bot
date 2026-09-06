@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 from pathlib import Path
 
@@ -82,6 +81,13 @@ async def _resolve_specific_card_target(page: Page, candidate: dict) -> dict:
                       .replace(/\s+/g, ' ')
                       .trim();
                 }
+                function hasSelectedPrice(text) {
+                    if (price === 0) {
+                        return /(?:\+\s*)?₩\s*0\b|\b0\s+(?:South Korean won|Korean won|KRW)\b/i.test(text);
+                    }
+                    const compact = text.replaceAll(',', '');
+                    return compact.includes(String(price));
+                }
                 function flightLike(el) {
                     if (!visible(el)) return false;
                     const text = textOf(el);
@@ -89,8 +95,7 @@ async def _resolve_specific_card_target(page: Page, candidate: dict) -> dict:
                     const upper = text.toUpperCase();
                     if (!times.every(t => upper.includes(String(t).toUpperCase()))) return false;
                     if (!flightShapeRe.test(text)) return false;
-                    const digits = text.replaceAll(',', '');
-                    if (!digits.includes(String(price))) return false;
+                    if (!hasSelectedPrice(text)) return false;
                     return true;
                 }
                 function info(el, mode) {
