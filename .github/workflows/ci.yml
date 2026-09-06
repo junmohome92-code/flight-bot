@@ -31,6 +31,19 @@ jobs:
       - run: python -m pip install -c constraints.txt -e '.[dev]'
       - run: python -m compileall -q src scripts tests
       - run: python -m pytest -q
+      - name: Parse Windows notification test menu
+        shell: pwsh
+        run: |
+          $path = 'flight-bot - test win/notification-test-menu.ps1'
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path $path), [ref]$tokens, [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | Format-List | Out-String | Write-Error
+            exit 1
+          }
       - name: Verify Windows Playwright Chromium install and launch
         shell: pwsh
         run: |
@@ -65,24 +78,34 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build production image
         run: docker build -t flight-bot-ci .
-      - name: Run container and verify health endpoint
+      - name: Run container and verify health/admin test surface
         shell: bash
         run: |
           set -euo pipefail
-          docker run -d --name flight-bot-ci -p 127.0.0.1:18080:8080 flight-bot-ci
+          docker run -d --name flight-bot-ci \
+            -e ADMIN_SECRET=ci-secret \
+            -p 127.0.0.1:18080:8080 \
+            flight-bot-ci
           trap 'docker logs flight-bot-ci || true; docker rm -f flight-bot-ci >/dev/null 2>&1 || true' EXIT
           python - <<'PY'
           import json
           import time
           import urllib.request
 
+          base = 'http://127.0.0.1:18080'
           last = None
           for _ in range(40):
               try:
-                  with urllib.request.urlopen('http://127.0.0.1:18080/health', timeout=2) as response:
+                  with urllib.request.urlopen(base + '/health', timeout=2) as response:
                       payload = json.load(response)
                   assert payload['ok'] is True
                   assert payload['provider_accepted_for_alerts'] is True
+                  assert payload['search_interval_hours'] == 2
+                  assert payload['daily_summary_hour'] == 8
+                  assert payload['browser_search_storage_isolated'] is True
+                  assert payload['slots_max'] == 10
+                  assert payload['slots_design_capacity'] == 10
+                  assert payload['admin_endpoint_enabled'] is True
                   print(payload)
                   break
               except Exception as exc:
@@ -90,5 +113,30 @@ jobs:
                   time.sleep(0.5)
           else:
               raise SystemExit(f'health endpoint did not become ready: {last}')
+
+          def post(path):
+              request = urllib.request.Request(
+                  base + path,
+                  data=b'',
+                  method='POST',
+                  headers={'X-Flight-Bot-Secret': 'ci-secret'},
+              )
+              with urllib.request.urlopen(request, timeout=10) as response:
+                  return json.load(response)
+
+          # Nonexistent slot avoids any live Google call while proving that the
+          # Docker image exposes both manual notification test routes.
+          target = post('/admin/check-slot/10')
+          assert target['accepted'] is True
+          assert target['mode'] == 'target-check-slot'
+          assert target['slot_id'] == 10
+          assert '찾을 수 없습니다' in target['result']
+
+          summary = post('/admin/daily-summary/10')
+          assert summary['accepted'] is True
+          assert summary['mode'] == 'daily-summary-slot'
+          assert summary['target_alerts'] is False
+          assert summary['slot_id'] == 10
+          assert '찾을 수 없습니다' in summary['result']
           PY
           test "$(docker inspect --format='{{.Config.User}}' flight-bot-ci)" = "app"

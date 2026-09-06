@@ -38,20 +38,20 @@ def offer(price=311811):
     )
 
 
-def test_five_active_slots_and_pause_still_occupies(tmp_path):
+def test_ten_active_slots_and_pause_still_occupies(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
-    assert [add(db, n).id for n in range(5)] == [1, 2, 3, 4, 5]
+    assert [add(db, n).id for n in range(10)] == list(range(1, 11))
     db.set_enabled(1, False)
+    with pytest.raises(ValueError, match="10개"):
+        add(db, 10)
+
+
+def test_slot_limit_can_be_lowered_without_changing_ten_slot_schema(tmp_path):
+    assert SLOT_DESIGN_CAPACITY == 10
+    db = Database(str(tmp_path / "db.sqlite"), slot_limit=5)
+    assert [add(db, n).id for n in range(5)] == [1, 2, 3, 4, 5]
     with pytest.raises(ValueError, match="5개"):
         add(db, 5)
-
-
-def test_design_capacity_can_be_raised_to_ten_without_schema_change(tmp_path):
-    assert SLOT_DESIGN_CAPACITY == 10
-    db = Database(str(tmp_path / "db.sqlite"), slot_limit=10)
-    assert [add(db, n).id for n in range(10)] == list(range(1, 11))
-    with pytest.raises(ValueError):
-        add(db, 10)
 
 
 def test_delete_reuses_number_but_changes_generation(tmp_path):

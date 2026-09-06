@@ -9,14 +9,16 @@ def test_default_search_cadence_daily_summary_and_slot_policy():
     assert settings.search_interval_hours == 2
     assert settings.scheduled_search_hours == list(range(0, 24, 2))
     assert settings.daily_summary_hour == 8
-    assert settings.slot_active_limit == 5
-    assert CURRENT_SLOT_LIMIT == 5
+    assert settings.slot_active_limit == 10
+    assert CURRENT_SLOT_LIMIT == 10
     assert SLOT_DESIGN_CAPACITY == 10
 
 
-def test_runtime_slot_limit_cannot_exceed_current_five_slot_release():
+def test_runtime_slot_limit_can_be_lowered_but_not_exceed_ten():
+    assert Settings(slot_active_limit=5).slot_active_limit == 5
+    assert Settings(slot_active_limit=10).slot_active_limit == 10
     with pytest.raises(ValidationError):
-        Settings(slot_active_limit=6)
+        Settings(slot_active_limit=11)
 
 
 def test_daily_summary_hour_must_reuse_a_scheduled_search():
