@@ -17,13 +17,11 @@ $PythonLauncher = $null
 $PythonArgs = @()
 
 if (Get-Command py -ErrorAction SilentlyContinue) {
-    # First try an already-installed CPython 3.12 runtime.
     & py -3.12 -c "import sys; print(sys.version)" *> $null
     if ($LASTEXITCODE -ne 0) {
         Write-Host '[2/6] Python 3.12 runtime not found. Installing with Windows Python launcher ...'
         & py install 3.12
         Assert-LastExitCode 'Python 3.12 installation'
-
         & py -3.12 -c "import sys; print(sys.version)" *> $null
         Assert-LastExitCode 'Python 3.12 verification'
     } else {
@@ -62,10 +60,10 @@ if (-not (Test-Path $VenvPython)) {
     Write-Host '[3/6] Reusing existing .venv-win'
 }
 
-Write-Host '[4/6] Installing flight-bot + dev dependencies ...'
+Write-Host '[4/6] Installing flight-bot + tested dependency constraints ...'
 & $VenvPython -m pip install --upgrade pip
 Assert-LastExitCode 'pip upgrade'
-& $VenvPython -m pip install -e '.[dev]'
+& $VenvPython -m pip install -c 'constraints.txt' -e '.[dev]'
 Assert-LastExitCode 'Project dependency installation'
 
 Write-Host '[5/6] Installing Playwright Chromium ...'
