@@ -36,20 +36,20 @@ $env:GOOGLE_UI_SEARCH_URL = 'https://www.google.com/travel/flights/search?tfs=CB
 Remove-Item Env:BROWSER_CHANNEL -ErrorAction SilentlyContinue
 Remove-Item Env:GOOGLE_UI_CHEAPEST_URL -ErrorAction SilentlyContinue
 
-Write-Host 'Google Flights resilient Cheapest + transient Booking probe'
+Write-Host 'Google Flights canonical Cheapest-first refresh + Booking acceptance'
 Write-Host '  CJJ -> TPE -> CJJ'
 Write-Host '  2026-09-18 ~ 2026-09-20'
 Write-Host '  1 adult / Economy / KRW'
-Write-Host '  cold-load Price unavailable auto-reload: YES'
-Write-Host '  bounded full-page reloads: 2'
+Write-Host '  existing Edge startup tab reused: YES'
+Write-Host '  Cheapest selected before forced refresh: YES'
+Write-Host '  forced full refresh after Cheapest: 1'
+Write-Host '  additional Price unavailable recovery reloads: 2 max'
 Write-Host '  TargetClosed browser-session restart: 1'
 Write-Host '  same Edge profile retained across retries: YES'
 Write-Host '  observer active before Cheapest click: YES'
 Write-Host '  text-node mutation capture: YES'
-Write-Host '  explicit Cheapest/최저가 click: YES'
 Write-Host '  actual pointer-event boundary: YES'
 Write-Host '  delayed selected-state cannot discard post-click transient rows: YES'
-Write-Host '  fresh post-click control re-query: YES'
 Write-Host '  strong selected-state evidence: aria-selected/pressed/checked/current/data-state'
 Write-Host '  candidate + advertised stability gate: YES'
 Write-Host '  Returning full-navigation capture: YES'
@@ -63,11 +63,11 @@ Write-Host "  selection wait: $($env:GOOGLE_UI_SELECTION_WAIT_MS) ms"
 Write-Host "  booking wait: $($env:GOOGLE_UI_BOOKING_WAIT_MS) ms"
 Write-Host ''
 
-& $VenvPython 'scripts\google_booking_pointer_probe_v7.py'
+& $VenvPython 'scripts\google_booking_acceptance.py'
 if ($LASTEXITCODE -ne 0) {
-    throw "Google UI resilient booking probe failed with exit code $LASTEXITCODE. Check artifacts\google-ui-win."
+    throw "Google UI canonical booking acceptance failed with exit code $LASTEXITCODE. Check artifacts\google-ui-win."
 }
 
 Write-Host ''
 Write-Host 'Probe complete.'
-Write-Host 'Paste the price-recovery/Cheapest/departure/return/Booking output and SUMMARY into the next ChatGPT chat.'
+Write-Host 'Paste the tab-count/Cheapest-refresh/departure/return/Booking output and SUMMARY into the next ChatGPT chat.'
