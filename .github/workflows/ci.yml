@@ -47,11 +47,12 @@ jobs:
       - run: pip install -c constraints.txt -e '.[dev]'
       - name: Install Chromium for synthetic lifecycle test
         run: python -m playwright install --with-deps chromium
-      - name: Verify Cheapest, transient capture, reload recovery and Returning navigation
+      - name: Verify canonical one-tab Cheapest-first refresh and navigation safety
         env:
           RUN_BROWSER_CONTRACT_TESTS: "1"
         run: >-
           pytest -q
+          tests/test_google_acceptance_structure.py
           tests/test_google_browser_contract.py
           tests/test_google_cheapest_selection.py
           tests/test_google_price_unavailable_recovery.py

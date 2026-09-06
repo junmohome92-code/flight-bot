@@ -68,7 +68,26 @@ class PlaywrightBrowserSession:
 
     async def new_page(self) -> Page:
         context = await self._ensure_started()
-        page = await context.new_page()
+
+        # Persistent contexts commonly start with one about:blank tab. Reuse it
+        # instead of blindly opening a second visible tab. Once the provider
+        # closes that page after a search, later searches simply create a fresh
+        # page as before.
+        page = next(
+            (
+                candidate
+                for candidate in context.pages
+                if not candidate.is_closed()
+                and (
+                    candidate.url in {"", "about:blank", "edge://newtab/", "chrome://newtab/"}
+                    or candidate.url.startswith("edge://newtab")
+                    or candidate.url.startswith("chrome://newtab")
+                )
+            ),
+            None,
+        )
+        if page is None:
+            page = await context.new_page()
         page.set_default_timeout(self.settings.browser_timeout_ms)
         return page
 
