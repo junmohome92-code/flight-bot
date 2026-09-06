@@ -19,6 +19,8 @@ jobs:
           python-version: "3.12"
       - run: pip install -c constraints.txt -e '.[dev]'
       - run: python -m compileall -q src scripts tests
+      - name: Parse Ubuntu deployment scripts
+        run: bash -n deploy/ubuntu-deploy.sh deploy/ubuntu-live-check.sh
       - run: pytest -q
 
   unit-windows:
@@ -75,7 +77,7 @@ jobs:
       - run: pip install -c constraints.txt -e '.[dev]'
       - name: Install Chromium for synthetic lifecycle test
         run: python -m playwright install --with-deps chromium
-      - name: Verify canonical one-tab Cheapest-first refresh and navigation safety
+      - name: Verify canonical Cheapest/query/direct-row contracts
         env:
           RUN_BROWSER_CONTRACT_TESTS: "1"
         run: >-
@@ -87,6 +89,7 @@ jobs:
           tests/test_google_price_unavailable_recovery.py
           tests/test_google_return_phase_boundary.py
           tests/test_runtime_results_provider.py
+          tests/test_runtime_row_context.py
           tests/test_google_query.py
 
   docker-smoke:
