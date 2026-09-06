@@ -1,0 +1,14 @@
+.git
+.github
+.venv*
+__pycache__
+.pytest_cache
+artifacts
+flight-bot - test win
+scripts
+tests
+*.db
+*.sqlite3
+.env
+.env.*
+README.md
