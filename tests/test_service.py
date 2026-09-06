@@ -35,10 +35,18 @@ class FakeProvider:
             observed_price_value=price,
             verified_checkout_price=price if self.verified else None,
             price_verified=self.verified,
-            verification_status="external_checkout_final_total" if self.verified else "unverified",
-            result_url="https://www.google.com/travel/flights/search?test=1",
+            verification_status="external_checkout_final_total" if self.verified else "naver_sse_round_trip_fare",
+            result_url="https://flight.naver.com/flights/international/test",
             display_offers=[
-                {"price": price, "airline": "TEST AIR", "times": ["10:00 AM", "12:00 PM"], "nonstop": True}
+                {
+                    "price": price,
+                    "outbound_airline": "TEST AIR",
+                    "return_airline": "TEST AIR",
+                    "outbound_flight": "TA100",
+                    "return_flight": "TA101",
+                    "times": ["10:00", "12:00", "15:00", "17:00"],
+                    "nonstop": True,
+                }
             ],
             raw={"observed_price": price},
             fetched_at=datetime.now(timezone.utc),
@@ -69,7 +77,7 @@ def make_slot(db: Database, *, owner_id="1"):
         depart_date="2026-09-18",
         return_date="2026-09-20",
         target_price=350000,
-        nonstop=False,
+        nonstop=True,
         checked_bag=0,
     )
 
@@ -98,7 +106,7 @@ async def test_target_alert_is_one_shot_until_target_is_explicitly_changed(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_daily_summary_is_sent_once_when_requested_and_uses_cheapest_window(tmp_path):
+async def test_daily_summary_is_sent_once_when_requested_and_uses_ranked_window(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     slot = make_slot(db)
     provider = FakeProvider([400000, 390000])
@@ -113,7 +121,7 @@ async def test_daily_summary_is_sent_once_when_requested_and_uses_cheapest_windo
     assert len(notifier.messages) == 1
     text = notifier.messages[0][2]
     assert text.startswith("📊 정기 가격 알림")
-    assert "Google Flights 직항 왕복가" in text
+    assert "Naver Flights 직항 왕복가" in text
     assert "390,000" in text
     assert text.count("https://") == 1
 
