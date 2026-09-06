@@ -8,6 +8,8 @@ from pathlib import Path
 
 from playwright.async_api import Page, async_playwright
 
+from flight_bot.google_query import QUERY_CONTRACT, build_google_flights_search_url
+from flight_bot.google_results_flow import prepare_cheapest_surface
 from flight_bot.providers import rank_alert_candidates
 
 try:  # direct Windows execution from scripts/
@@ -30,7 +32,22 @@ async def _run_session(playwright) -> None:
     keep_open_seconds = int(os.getenv("BROWSER_KEEP_OPEN_SECONDS", "8"))
     artifact_dir = Path(os.getenv("BROWSER_DEBUG_DIR", "artifacts/google-ui-win"))
     profile_dir = Path(os.getenv("BROWSER_PROFILE_DIR", "artifacts/google-profile-win"))
-    search_url = os.getenv("GOOGLE_UI_SEARCH_URL", base.ACCEPTANCE_BASE_URL).strip()
+
+    canonical_url = build_google_flights_search_url(
+        origin=base.ORIGIN,
+        destination=base.DESTINATION,
+        depart_date="2026-09-18",
+        return_date="2026-09-20",
+        language="en",
+        gl="kr",
+        currency="KRW",
+    )
+    supplied_url = os.getenv("GOOGLE_UI_SEARCH_URL", "").strip()
+    if supplied_url and supplied_url != canonical_url:
+        raise RuntimeError(
+            "GOOGLE_UI_SEARCH_URL does not match the production accepted-tfs-v1 query contract"
+        )
+    search_url = canonical_url
 
     artifact_dir.mkdir(parents=True, exist_ok=True)
     profile_dir.mkdir(parents=True, exist_ok=True)
@@ -58,17 +75,22 @@ async def _run_session(playwright) -> None:
 
         page = await acceptance.claim_initial_page(context, timeout_ms)
         await page.goto(search_url, wait_until="domcontentloaded", timeout=timeout_ms)
+        print(f"query_contract={QUERY_CONTRACT}")
         print(f"selection_url={page.url}")
 
-        page, recovery_count = await acceptance.prepare_cheapest_surface(
-            context,
+        async def reload_adapter(current: Page, url: str, timeout: int) -> Page:
+            return await acceptance.reload_or_reopen(context, current, url, timeout)
+
+        print("\n=== CHEAPEST WARM-UP + FULL REFRESH ===")
+        page, recovery_count = await prepare_cheapest_surface(
             page,
             search_url,
+            reload_page=reload_adapter,
             timeout_ms=timeout_ms,
             selection_wait_ms=selection_wait_ms,
             ready_wait_ms=ready_wait_ms,
             recovery_reloads=recovery_reloads,
-            artifact_dir=artifact_dir,
+            ensure_selected=cheapest.ensure_cheapest_selected,
         )
 
         print("\n=== DIRECT GOOGLE RESULTS ===")
@@ -100,7 +122,7 @@ async def _run_session(playwright) -> None:
         await base.save_json(artifact_dir / "snapshot-direct-offers.json", direct_rows)
         print(f"departure_selection_policy={policy}")
         print(f"price_recovery_reload_count={recovery_count}")
-        print(f"alert_nonstop_only=True")
+        print("alert_nonstop_only=True")
         print(f"alert_max_offers={max_offers}")
         print(f"direct_offer_count={len(direct_rows)}")
         for index, row in enumerate(direct_rows, start=1):
@@ -112,6 +134,7 @@ async def _run_session(playwright) -> None:
             )
 
         print("\n=== SUMMARY ===")
+        print(f"query_contract={QUERY_CONTRACT}")
         print(f"lowest_direct_round_trip={int(direct_rows[0]['price']):,} KRW")
         print(f"displayed_direct_offers={len(direct_rows)}")
         print("connections_in_alert=0")
@@ -151,6 +174,7 @@ async def main() -> None:
         raise SystemExit("This acceptance probe must run visible; BROWSER_HEADLESS=false")
 
     print("Google Flights direct-results alert acceptance")
+    print(f"  production query contract: {QUERY_CONTRACT}")
     print("  Cheapest-first forced refresh: YES")
     print("  round-trip displayed price source: YES")
     print("  connections/stops excluded from alert: YES")
