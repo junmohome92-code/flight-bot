@@ -47,6 +47,19 @@
       .toUpperCase();
   }
 
+  function semanticText(node) {
+    if (!(node instanceof Node)) return '';
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+    const parts = [];
+    let current;
+    while ((current = walker.nextNode())) {
+      const value = (current.textContent || '').replace(/\s+/g, ' ').trim();
+      if (value) parts.push(value);
+      if (parts.length > 160) break;
+    }
+    return parts.join(' ').trim();
+  }
+
   function priceFloor() {
     return state.phase === 'returning' ? 0 : 50000;
   }
@@ -101,7 +114,7 @@
   }
 
   function scanPageMarkers() {
-    const body = (document.body?.innerText || '').slice(0, 18000);
+    const body = (document.body?.innerText || semanticText(document.body) || '').slice(0, 18000);
     state.cheapestLoading = loadingRe.test(body);
 
     if (state.phase === 'returning' && !state.returningMarker && returningRe.test(body)) {
@@ -112,7 +125,7 @@
     const controls = document.querySelectorAll('[role="tab"], button, [role="button"]');
     let sawSelectedCheapest = false;
     for (const control of controls) {
-      const text = `${control.innerText || control.textContent || ''}\n${control.getAttribute('aria-label') || ''}`.trim();
+      const text = `${control.innerText || semanticText(control) || control.textContent || ''}\n${control.getAttribute('aria-label') || ''}`.trim();
       if (!text || text.length > 900 || !cheapestRe.test(text)) continue;
       const selected = control.getAttribute('aria-selected') === 'true' || control.getAttribute('aria-pressed') === 'true';
       if (!selected) continue;
@@ -131,8 +144,8 @@
       }
     }
     if (state.phase === 'departure' && !sawSelectedCheapest && state.cheapestSelected) {
-      // Do not reset a confirmed transition because Google may replace the tab
-      // node during loading. The timestamp remains the acceptance boundary.
+      // Keep the confirmed transition even when Google replaces the selected
+      // tab DOM node during loading.
     }
   }
 
@@ -143,7 +156,10 @@
     const reverseToken = state.phase === 'returning' ? `${origin}-${destination}` : `${destination}-${origin}`;
     let node = source;
     for (let depth = 0; depth < 18 && node; depth += 1, node = node.parentElement) {
-      const text = (node.innerText || node.textContent || '').trim();
+      // Google frequently lays out flight fields as adjacent inline spans. Using
+      // innerText alone can concatenate values (for example PM1:10), so build a
+      // semantic row string by joining descendant Text nodes with spaces.
+      const text = semanticText(node);
       if (!text) continue;
       if (text.length > 1800 || broadMarkerRe.test(text)) {
         state.rejectedBroad += 1;
