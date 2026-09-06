@@ -53,8 +53,8 @@ def test_rank_alert_candidate_limit_is_configurable_not_fixed_to_four():
     assert [item["price"] for item in ranked] == [300000, 310000, 320000]
 
 
-def test_alert_message_contains_only_one_google_results_link(tmp_path):
-    settings = Settings(_env_file=None, alert_max_offers=4)
+def _service_and_slot(tmp_path, *, max_offers=4):
+    settings = Settings(_env_file=None, alert_max_offers=max_offers)
     service = FlightService(settings, Database(str(tmp_path / "db.sqlite")), provider=object())
     slot = service.db.add_slot(
         platform="telegram",
@@ -67,6 +67,11 @@ def test_alert_message_contains_only_one_google_results_link(tmp_path):
         nonstop=True,
         checked_bag=0,
     )
+    return service, slot
+
+
+def test_alert_message_contains_only_one_google_results_link(tmp_path):
+    service, slot = _service_and_slot(tmp_path)
     result_url = "https://www.google.com/travel/flights/search?example=roundtrip"
     offer = FlightOffer(
         provider="google-playwright-results-observed",
@@ -95,6 +100,31 @@ def test_alert_message_contains_only_one_google_results_link(tmp_path):
     assert "Booking" not in message
     assert "checkout" not in message.lower()
     assert "판매처" not in message
+
+
+def test_alert_window_dedupes_same_flight_exposed_twice_by_google(tmp_path):
+    service, slot = _service_and_slot(tmp_path)
+    offer = FlightOffer(
+        provider="google-playwright-results-observed",
+        origin="CJJ",
+        destination="TPE",
+        depart_date="2026-09-18",
+        return_date="2026-09-20",
+        total_price=308545,
+        observed_price_value=308545,
+        result_url="https://www.google.com/travel/flights/search?dedupe=1",
+        display_offers=[
+            {"price": 308545, "airline": "EASTAR JET", "times": ["11:40 PM", "1:10 AM"], "flight_numbers": None, "nonstop": True},
+            {"price": 308545, "airline": "  EASTAR   JET ", "times": ["11:40 PM", "1:10 AM"], "flight_numbers": "", "nonstop": True},
+            {"price": 381095, "airline": "Aero K Airlines", "times": ["10:30 AM", "12:20 PM"], "flight_numbers": None, "nonstop": True},
+        ],
+    )
+
+    message = service.format_offer(slot, offer)
+
+    assert message.count("308,545KRW") == 1
+    assert message.count("381,095KRW") == 1
+    assert "3. " not in message
 
 
 class _ObservedProvider:

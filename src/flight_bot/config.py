@@ -6,6 +6,10 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+SLOT_DESIGN_CAPACITY = 10
+CURRENT_SLOT_LIMIT = 5
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -13,13 +17,25 @@ class Settings(BaseSettings):
     http_port: int = 8080
     database_path: str = "/data/flight_bot.db"
     timezone: str = "Asia/Seoul"
-    check_hours: str = "8,20"
+
+    # Runtime cadence. Price scans happen every N hours; only one of those
+    # scans per day also emits the regular price summary.
+    search_interval_hours: int = Field(default=2, ge=1, le=24)
+    daily_summary_hour: int = Field(default=8, ge=0, le=23)
+
+    # Storage/domain internals are safe up to ten fixed IDs, while this release
+    # intentionally exposes only five active slots. A later release can raise
+    # CURRENT_SLOT_LIMIT without a DB schema migration.
+    slot_active_limit: int = Field(default=CURRENT_SLOT_LIMIT, ge=1, le=CURRENT_SLOT_LIMIT)
 
     # Google Flights / Playwright
     browser_headless: bool = True
     browser_timeout_ms: int = 45_000
     browser_block_assets: bool = True
     browser_debug_dir: str = ""
+    # Kept for config compatibility only. Runtime price searches use an
+    # isolated BrowserContext per search so cookies/cache/site storage do not
+    # carry over between two-hour observations.
     browser_profile_dir: str = ""
     google_language: str = "en"
     google_currency: str = "KRW"
@@ -61,25 +77,24 @@ class Settings(BaseSettings):
         return self._csv_set(self.kakao_allowed_user_ids)
 
     @property
-    def scheduled_hours(self) -> list[int]:
-        try:
-            hours = sorted({int(x.strip()) for x in self.check_hours.split(",") if x.strip()})
-        except ValueError as exc:
-            raise ValueError("CHECK_HOURS must be comma-separated integers 0-23") from exc
-        if any(hour < 0 or hour > 23 for hour in hours):
-            raise ValueError("CHECK_HOURS must contain 0-23 only")
-        return hours
+    def scheduled_search_hours(self) -> list[int]:
+        """Return deterministic wall-clock search hours for the configured cadence.
+
+        The default is every two hours: 00,02,...,22. The daily summary hour
+        must be one of those search hours so the summary can reuse that scan
+        instead of creating an extra Google request.
+        """
+        return list(range(0, 24, self.search_interval_hours))
 
     def runtime_security_errors(self) -> list[str]:
-        """Return unsafe production channel combinations.
-
-        Bot credentials without allowlists are fail-open by nature. Production
-        startup rejects those combinations instead of silently exposing all
-        commands to anyone who can reach the bot/channel.
-        """
-        if self.app_env.lower() != "production":
-            return []
+        """Return unsafe production channel combinations."""
         errors: list[str] = []
+        if self.daily_summary_hour not in self.scheduled_search_hours:
+            errors.append(
+                "DAILY_SUMMARY_HOUR must align with SEARCH_INTERVAL_HOURS so the daily summary reuses a scheduled scan"
+            )
+        if self.app_env.lower() != "production":
+            return errors
         if self.telegram_bot_token and not self.telegram_chat_ids:
             errors.append("TELEGRAM_BOT_TOKEN requires TELEGRAM_ALLOWED_CHAT_IDS in production")
         if self.discord_bot_token and not self.discord_channel_ids:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 
@@ -9,98 +8,100 @@ from .config import Settings
 
 
 class PlaywrightBrowserSession:
-    """Reusable Chromium session for the legacy runtime provider.
+    """Reuse Chromium while giving every Google price search fresh storage.
 
-    The service already serializes searches, so one browser context can be
-    reused across slots instead of launching Chromium for every query. When
-    ``BROWSER_PROFILE_DIR`` is configured, Playwright uses a persistent profile
-    directory; otherwise it falls back to an in-memory context.
+    Google Flights observations must not inherit cookies, HTTP cache, local
+    storage, IndexedDB or service-worker state from the previous two-hour scan.
+    We therefore keep only the Chromium *process* warm and create a brand-new
+    BrowserContext for each search. Before the next search starts, every prior
+    context is destroyed.
+
+    ``BROWSER_PROFILE_DIR`` remains accepted by Settings for compatibility with
+    older deployments, but runtime price searches intentionally do not use it.
     """
 
     def __init__(self, settings: Settings):
         self.settings = settings
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
-        self._context: BrowserContext | None = None
         self._start_lock = asyncio.Lock()
+        self._contexts: set[BrowserContext] = set()
 
-    async def _ensure_started(self) -> BrowserContext:
-        if self._context is not None:
-            return self._context
+    async def _ensure_started(self) -> Browser:
+        if self._browser is not None and self._browser.is_connected():
+            return self._browser
         async with self._start_lock:
-            if self._context is not None:
-                return self._context
-
-            self._playwright = await async_playwright().start()
-            launch_args = ["--disable-dev-shm-usage"]
-            common = dict(
+            if self._browser is not None and self._browser.is_connected():
+                return self._browser
+            if self._playwright is None:
+                self._playwright = await async_playwright().start()
+            self._browser = await self._playwright.chromium.launch(
                 headless=self.settings.browser_headless,
-                args=launch_args,
+                args=["--disable-dev-shm-usage"],
             )
+            return self._browser
 
-            if self.settings.browser_profile_dir:
-                profile = Path(self.settings.browser_profile_dir)
-                profile.mkdir(parents=True, exist_ok=True)
-                self._context = await self._playwright.chromium.launch_persistent_context(
-                    user_data_dir=str(profile),
-                    locale="en-US",
-                    timezone_id=self.settings.timezone,
-                    viewport={"width": 1365, "height": 900},
-                    **common,
-                )
-            else:
-                self._browser = await self._playwright.chromium.launch(**common)
-                self._context = await self._browser.new_context(
-                    locale="en-US",
-                    timezone_id=self.settings.timezone,
-                    viewport={"width": 1365, "height": 900},
-                )
-
-            if self.settings.browser_block_assets:
-                async def route_handler(route):
-                    if route.request.resource_type in {"image", "media", "font"}:
-                        await route.abort()
-                    else:
-                        await route.continue_()
-
-                await self._context.route("**/*", route_handler)
-            return self._context
-
-    async def new_page(self) -> Page:
-        context = await self._ensure_started()
-
-        # Persistent contexts commonly start with one about:blank tab. Reuse it
-        # instead of blindly opening a second visible tab. Once the provider
-        # closes that page after a search, later searches simply create a fresh
-        # page as before.
-        page = next(
-            (
-                candidate
-                for candidate in context.pages
-                if not candidate.is_closed()
-                and (
-                    candidate.url in {"", "about:blank", "edge://newtab/", "chrome://newtab/"}
-                    or candidate.url.startswith("edge://newtab")
-                    or candidate.url.startswith("chrome://newtab")
-                )
-            ),
-            None,
-        )
-        if page is None:
-            page = await context.new_page()
-        page.set_default_timeout(self.settings.browser_timeout_ms)
-        return page
-
-    async def close(self) -> None:
-        context, browser, playwright = self._context, self._browser, self._playwright
-        self._context = None
-        self._browser = None
-        self._playwright = None
-        if context is not None:
+    async def _discard_old_contexts(self) -> None:
+        old = list(self._contexts)
+        self._contexts.clear()
+        for context in old:
             try:
                 await context.close()
             except Exception:
                 pass
+
+    async def _new_isolated_context(self) -> BrowserContext:
+        # Searches are serialized by FlightService. Destroying the previous
+        # context here is therefore safe and guarantees a clean observation.
+        await self._discard_old_contexts()
+        browser = await self._ensure_started()
+        context = await browser.new_context(
+            locale="en-US",
+            timezone_id=self.settings.timezone,
+            viewport={"width": 1365, "height": 900},
+            service_workers="block",
+        )
+        self._contexts.add(context)
+
+        if self.settings.browser_block_assets:
+            async def route_handler(route):
+                if route.request.resource_type in {"image", "media", "font"}:
+                    await route.abort()
+                else:
+                    await route.continue_()
+
+            await context.route("**/*", route_handler)
+        return context
+
+    async def new_page(self) -> Page:
+        context = await self._new_isolated_context()
+        page = await context.new_page()
+        page.set_default_timeout(self.settings.browser_timeout_ms)
+        return page
+
+    async def release_page(self, page: Page) -> None:
+        """Destroy the page's whole context immediately when supported."""
+        try:
+            context = page.context
+        except Exception:
+            context = None
+        if context is not None:
+            self._contexts.discard(context)
+            try:
+                await context.close()
+                return
+            except Exception:
+                pass
+        try:
+            await page.close()
+        except Exception:
+            pass
+
+    async def close(self) -> None:
+        await self._discard_old_contexts()
+        browser, playwright = self._browser, self._playwright
+        self._browser = None
+        self._playwright = None
         if browser is not None:
             try:
                 await browser.close()

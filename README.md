@@ -26,6 +26,22 @@ OTA/여행사 링크 제공      NO
 
 알람에서 사용자에게 제공하는 URL은 **Google Flights 검색결과 링크 하나뿐**입니다.
 
+## 검색 / 정기 알림 주기
+
+기본값:
+
+```text
+SEARCH_INTERVAL_HOURS=2
+DAILY_SUMMARY_HOUR=8
+```
+
+- 가격 검색은 매 2시간마다 수행합니다.
+- 기본 검색 시각은 `00, 02, 04, ... 22시`입니다.
+- 오전 8시 검색 결과는 하루 1회 **정기 가격 알림**으로도 전송합니다.
+- 정기 알림 때문에 Google을 한 번 더 조회하지 않습니다. 해당 2시간 검색 결과를 그대로 사용합니다.
+- 매 가격 검색마다 **새 BrowserContext**를 만들어 이전 검색의 cookies / HTTP cache / localStorage / IndexedDB / service worker 상태를 이어받지 않습니다.
+- Chromium process 자체는 재사용하므로 매번 브라우저 프로그램 전체를 재기동하지는 않습니다.
+
 ## 알람 정책
 
 기본값:
@@ -38,14 +54,41 @@ REQUIRE_VERIFIED_ALERTS=false
 
 - 경유편은 알람 후보에서 제외합니다.
 - `ALERT_MAX_OFFERS=4`는 최대 표시 개수입니다. 직항이 2개뿐이면 2개만 표시합니다.
-- 개수는 설정값이므로 코드 로직에 4개로 고정하지 않습니다.
+- 동일 항공편이 Google DOM에서 aria-label / visible text 두 경로로 중복 노출돼도 사용자 알림에서는 한 번만 표시합니다.
 - 목표가 비교는 Google Flights에 표시된 최저 직항 왕복가를 사용합니다.
 - 수하물 정보가 화면에서 신뢰성 있게 확인되지 않으면 `정보 확인 불가`로 표시합니다.
+
+### 목표가 도달 알림
+
+목표가 도달 알림은 **목표가 설정당 최초 1회만** 보냅니다.
+
+```text
+ARMED
+→ Google 표시 최저 직항가 <= target
+→ SENDING
+→ ALERTED
+```
+
+`ALERTED` 이후에는 가격이 다시 목표가 위로 올라가거나 내려가도 자동 재무장하지 않습니다.
+
+다시 목표가 알림을 받고 싶으면:
+
+```text
+/flight target <슬롯번호> <새 목표가>
+```
+
+로 목표가를 변경하면 `ARMED`로 다시 전환되어 1회 알림 기회가 생깁니다.
+
+목표가 알림이 정기 알림 시각과 같은 검색에서 처음 발생하면 같은 슬롯에 메시지가 2개 연속 가지 않도록 **목표가 도달 알림만 보내고 그날 정기 알림은 생략**합니다.
+
+### 하루 1회 정기 가격 알림
+
+정기 알림은 목표가와 무관하게 현재 직항 최저가 창을 보여줍니다.
 
 예시:
 
 ```text
-🔥 목표가 도달
+📊 정기 가격 알림
 ✈️ CJJ → TPE 왕복
 2026-09-18 ~ 2026-09-20
 Google Flights 직항 왕복가
@@ -56,9 +99,17 @@ Google Flights 직항 왕복가
 Google Flights 검색결과: <검색결과 URL>
 ```
 
-## 슬롯 / 알림 상태
+## 슬롯 정책
 
-저장 슬롯은 정확히 1/2/3 세 개입니다.
+현재 실제 사용 가능 슬롯:
+
+```text
+SLOT_ACTIVE_LIMIT=5
+```
+
+현재 릴리스에서는 슬롯 `1~5`까지 사용할 수 있습니다.
+
+내부 slot ID / storage 구조는 `1~10`까지 확장 가능하게 설계되어 있습니다. 향후 `SLOT_ACTIVE_LIMIT`을 늘려도 별도 DB schema migration 없이 확장할 수 있습니다.
 
 - pause: 슬롯 유지
 - delete: 슬롯 번호 해제/재사용
@@ -67,17 +118,6 @@ Google Flights 검색결과: <검색결과 URL>
 - add마다 `generation` UUID 생성
 - 설정/상태 변경마다 `revision` 증가
 - 검색 저장 시 generation/revision 재검증
-
-Alert latch:
-
-```text
-ARMED
-→ Google 표시 최저 직항가 <= target
-→ SENDING
-→ ALERTED
-→ 가격이 target 위로 복귀
-→ ARMED
-```
 
 ## 가격 의미
 
@@ -162,7 +202,7 @@ acceptance=GOOGLE_RESULTS_DIRECT_ONLY_SINGLE_LINK
 /help
 ```
 
-현재 add된 감시는 직항 기준으로 동작합니다.
+`/flight check`는 수동 조회만 하며 목표가 도달 알림/정기 알림 상태를 발생시키지 않습니다.
 
 ## 보안
 
@@ -188,6 +228,16 @@ Health endpoint:
 
 ```text
 GET /health
+```
+
+주요 health 필드:
+
+```text
+search_interval_hours=2
+daily_summary_hour=8
+browser_search_storage_isolated=true
+slots_max=5
+slots_design_capacity=10
 ```
 
 ## CI
