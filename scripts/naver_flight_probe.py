@@ -5,6 +5,7 @@ import asyncio
 import json
 import re
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlencode
@@ -18,13 +19,22 @@ DEFAULT_DEPART = "2026-09-18"
 DEFAULT_RETURN = "2026-09-20"
 
 
+@dataclass
+class NaverProbeResult:
+    url: str
+    rows: list[dict]
+    body: str
+    diagnostics: dict
+    artifact_dir: Path
+
+
 def build_naver_url(origin: str, destination: str, depart: str, return_date: str) -> str:
     origin = origin.strip().upper()
     destination = destination.strip().upper()
     depart_compact = depart.replace("-", "")
     return_compact = return_date.replace("-", "")
     path = (
-        f"https://flight.naver.com/flights/international/"
+        "https://flight.naver.com/flights/international/"
         f"{origin}:airport-{destination}:airport-{depart_compact}/"
         f"{destination}:airport-{origin}:airport-{return_compact}"
     )
@@ -32,81 +42,171 @@ def build_naver_url(origin: str, destination: str, depart: str, return_date: str
     return f"{path}?{query}"
 
 
+# Naver changes CSS class names often.  The extractor therefore does not rely on
+# one hashed class.  It starts at visible text nodes that look like prices and
+# walks upward until it finds a compact flight-result context containing times.
+# It also traverses open shadow roots.  We still refuse body-wide minimum-price
+# scraping because that could mistake calendar/ad prices for a flight result.
 _COLLECT_ROWS_JS = r"""
 () => {
-  const priceRe = /(?:₩\s*)?([0-9]{1,3}(?:,[0-9]{3})+)\s*(?:원|KRW)?/g;
   const timeRe = /\b(?:[01]?\d|2[0-3]):[0-5]\d\b/g;
   const directRe = /직항|direct|nonstop/i;
-  const transferRe = /경유|stopover|\bstops?\b/i;
-
-  function visible(el) {
-    if (!(el instanceof Element) || !el.isConnected) return false;
-    const style = getComputedStyle(el);
-    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-    const rect = el.getBoundingClientRect();
-    return rect.width > 2 && rect.height > 2;
-  }
+  const roundTripRe = /왕복|round\s*trip/i;
+  const routeRe = /CJJ|TPE|청주|타이(?:베이|완)|타오위안|공항|airport/i;
+  const flightRe = /항공|airlines?|airways?|flight/i;
+  const excludeRe = /달력|calendar|월\s*최저|최저가\s*달력|호텔|렌터카|투어|광고/i;
 
   function clean(text) {
     return String(text || '').replace(/\s+/g, ' ').trim();
   }
 
-  function prices(text) {
+  function visible(el) {
+    if (!(el instanceof Element) || !el.isConnected) return false;
+    const style = getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 2 && rect.height > 2;
+  }
+
+  function ownText(el) {
+    let out = '';
+    for (const node of el.childNodes) {
+      if (node.nodeType === Node.TEXT_NODE) out += ' ' + (node.textContent || '');
+    }
+    out += ' ' + (el.getAttribute('aria-label') || '');
+    out += ' ' + (el.getAttribute('title') || '');
+    return clean(out);
+  }
+
+  function priceHint(el) {
+    const hint = [
+      el.tagName,
+      el.className || '',
+      el.id || '',
+      el.getAttribute('data-testid') || '',
+      el.getAttribute('aria-label') || '',
+    ].join(' ');
+    return /price|fare|amount|cost|won|wonPrice|요금|가격/i.test(hint);
+  }
+
+  function parsePrices(text, hinted) {
+    const source = clean(text);
+    if (!source) return [];
+    const hasCurrency = /₩|KRW|원/i.test(source);
     const out = [];
-    priceRe.lastIndex = 0;
+    const re = /(?:₩\s*|KRW\s*)?([0-9]{2,3}(?:,[0-9]{3})+|[0-9]{5,7})\s*(?:원|KRW)?/gi;
     let m;
-    while ((m = priceRe.exec(text)) !== null) {
-      const value = Number(m[1].replaceAll(',', ''));
+    while ((m = re.exec(source)) !== null) {
+      const token = m[1];
+      if (!hasCurrency && !hinted && !token.includes(',')) continue;
+      const value = Number(token.replaceAll(',', ''));
       if (Number.isFinite(value) && value >= 50000 && value <= 1500000) out.push(value);
     }
     return [...new Set(out)];
   }
 
-  const rows = [];
-  const seen = new Set();
-  const nodes = document.querySelectorAll('strong, em, b, span, p, div');
+  function allElements(root) {
+    const out = [];
+    const stack = [root];
+    while (stack.length) {
+      const current = stack.pop();
+      if (!current || !current.querySelectorAll) continue;
+      for (const el of current.querySelectorAll('*')) {
+        out.push(el);
+        if (el.shadowRoot) stack.push(el.shadowRoot);
+      }
+    }
+    return out;
+  }
 
-  for (const el of nodes) {
+  function semanticContainer(node) {
+    const tag = (node.tagName || '').toLowerCase();
+    const role = (node.getAttribute && node.getAttribute('role')) || '';
+    const cls = String(node.className || '');
+    return /^(li|article|button|a)$/.test(tag) || role === 'listitem' ||
+      /flight|result|item|card|schedule|ticket|fare/i.test(cls);
+  }
+
+  const rows = [];
+  const anchors = [];
+  const seenRows = new Set();
+  const seenAnchors = new Set();
+
+  for (const el of allElements(document)) {
     if (!visible(el)) continue;
-    const own = clean(el.innerText || el.textContent || '');
-    if (!own || own.length > 120) continue;
-    const ownPrices = prices(own);
+    const own = ownText(el);
+    if (!own || own.length > 180) continue;
+    const hinted = priceHint(el);
+    const ownPrices = parsePrices(own, hinted);
     if (!ownPrices.length) continue;
+
+    const anchorKey = `${ownPrices.join(',')}|${own}`;
+    if (!seenAnchors.has(anchorKey) && anchors.length < 40) {
+      seenAnchors.add(anchorKey);
+      anchors.push({
+        prices: ownPrices,
+        text: own.slice(0, 220),
+        tag: el.tagName,
+        class_name: String(el.className || '').slice(0, 220),
+        hinted,
+      });
+    }
 
     for (const price of ownPrices) {
       let node = el;
-      for (let depth = 0; depth < 11 && node; depth += 1, node = node.parentElement) {
+      let best = null;
+      for (let depth = 0; depth < 16 && node; depth += 1, node = node.parentElement) {
+        if (!(node instanceof Element)) continue;
         const text = clean(node.innerText || node.textContent || '');
-        if (!text || text.length < 35) continue;
-        if (text.length > 1600) break;
+        if (!text || text.length < 20) continue;
+        if (text.length > 3000) break;
+        if (excludeRe.test(text) && !directRe.test(text)) continue;
 
-        timeRe.lastIndex = 0;
         const times = text.match(timeRe) || [];
-        if (times.length < 2 || times.length > 8) continue;
+        const rowPrices = parsePrices(text, priceHint(node));
+        if (!rowPrices.includes(price)) continue;
 
-        const direct = directRe.test(text);
-        const transfer = transferRe.test(text);
-        if (transfer && !direct) continue;
+        let score = 0;
+        if (times.length >= 2 && times.length <= 12) score += 6;
+        if (directRe.test(text)) score += 3;
+        if (roundTripRe.test(text)) score += 2;
+        if (routeRe.test(text)) score += 2;
+        if (flightRe.test(text)) score += 1;
+        if (semanticContainer(node)) score += 2;
+        if (text.length <= 1200) score += 1;
 
-        const rowPrices = prices(text);
-        if (!rowPrices.includes(price) || rowPrices.length > 8) continue;
-
-        const key = `${price}|${text.slice(0, 700).toUpperCase()}`;
-        if (seen.has(key)) break;
-        seen.add(key);
-        rows.push({
+        const candidate = {
           price,
-          times: times.slice(0, 4),
-          direct_evidence: direct ? 'row-direct-marker' : 'query-isDirect=true',
-          text: text.slice(0, 1200),
-        });
-        break;
+          times: times.slice(0, 6),
+          direct_evidence: directRe.test(text) ? 'row-direct-marker' : 'query-isDirect=true',
+          round_trip_evidence: roundTripRe.test(text) ? 'row-round-trip-marker' : 'round-trip-search-url',
+          score,
+          depth,
+          tag: node.tagName,
+          class_name: String(node.className || '').slice(0, 240),
+          text: text.slice(0, 1800),
+        };
+        if (!best || candidate.score > best.score ||
+            (candidate.score === best.score && candidate.text.length < best.text.length)) {
+          best = candidate;
+        }
       }
+
+      if (!best || best.score < 6 || best.times.length < 2) continue;
+      const key = `${best.price}|${best.times.slice(0, 2).join('|')}|${best.text.slice(0, 600).toUpperCase()}`;
+      if (seenRows.has(key)) continue;
+      seenRows.add(key);
+      rows.push(best);
     }
   }
 
-  rows.sort((a, b) => a.price - b.price || a.text.length - b.text.length);
-  return rows.slice(0, 12);
+  rows.sort((a, b) => b.score - a.score || a.price - b.price || a.text.length - b.text.length);
+  return {
+    rows: rows.slice(0, 24),
+    price_anchors: anchors,
+    body_has_direct: directRe.test(clean(document.body && document.body.innerText)),
+    body_has_round_trip: roundTripRe.test(clean(document.body && document.body.innerText)),
+  };
 }
 """
 
@@ -137,19 +237,78 @@ async def _body_text(page: Page) -> str:
         return ""
 
 
-async def _wait_for_rows(page: Page, timeout_seconds: int) -> tuple[list[dict], str]:
+async def _collect_all_frames(page: Page) -> tuple[list[dict], dict]:
+    all_rows: list[dict] = []
+    diagnostics: dict = {"frames": [], "price_anchors": []}
+
+    for index, frame in enumerate(page.frames):
+        frame_url = frame.url
+        try:
+            payload = await frame.evaluate(_COLLECT_ROWS_JS)
+        except Exception as exc:
+            diagnostics["frames"].append(
+                {"index": index, "url": frame_url, "error": f"{type(exc).__name__}: {exc}"}
+            )
+            continue
+
+        frame_rows = list(payload.get("rows") or [])
+        frame_anchors = list(payload.get("price_anchors") or [])
+        diagnostics["frames"].append(
+            {
+                "index": index,
+                "url": frame_url,
+                "row_count": len(frame_rows),
+                "price_anchor_count": len(frame_anchors),
+                "body_has_direct": bool(payload.get("body_has_direct")),
+                "body_has_round_trip": bool(payload.get("body_has_round_trip")),
+            }
+        )
+        for row in frame_rows:
+            row = dict(row)
+            row["frame_url"] = frame_url
+            all_rows.append(row)
+        for anchor in frame_anchors[:40]:
+            if len(diagnostics["price_anchors"]) >= 80:
+                break
+            item = dict(anchor)
+            item["frame_url"] = frame_url
+            diagnostics["price_anchors"].append(item)
+
+    # Semantic de-duplication.  Prefer the highest-scoring/smallest context for
+    # the same price and first two visible times.
+    best: dict[tuple, dict] = {}
+    for row in all_rows:
+        key = (int(row["price"]), tuple((row.get("times") or [])[:2]))
+        old = best.get(key)
+        if old is None:
+            best[key] = row
+            continue
+        old_score = int(old.get("score") or 0)
+        new_score = int(row.get("score") or 0)
+        if new_score > old_score or (
+            new_score == old_score and len(str(row.get("text") or "")) < len(str(old.get("text") or ""))
+        ):
+            best[key] = row
+
+    rows = list(best.values())
+    rows.sort(key=lambda row: (int(row["price"]), -int(row.get("score") or 0)))
+    return rows[:12], diagnostics
+
+
+async def _wait_for_rows(page: Page, timeout_seconds: int) -> tuple[list[dict], str, dict]:
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     last_body = ""
+    last_diagnostics: dict = {"frames": [], "price_anchors": []}
     cycle = 0
+
     while asyncio.get_running_loop().time() < deadline:
         cycle += 1
         await _dismiss_consent(page)
-        try:
-            rows = await page.evaluate(_COLLECT_ROWS_JS)
-        except Exception:
-            rows = []
+        rows, diagnostics = await _collect_all_frames(page)
+        diagnostics["cycle"] = cycle
+        last_diagnostics = diagnostics
         if rows:
-            return list(rows), await _body_text(page)
+            return rows, await _body_text(page), diagnostics
 
         last_body = await _body_text(page)
         lowered = last_body.lower()
@@ -163,47 +322,65 @@ async def _wait_for_rows(page: Page, timeout_seconds: int) -> tuple[list[dict], 
         if any(marker in lowered for marker in blocked_markers):
             raise RuntimeError("Naver Flights appears to be blocking or challenging this browser session")
 
+        # Naver virtualizes some result lists.  A small scroll makes the browser
+        # render additional result cards without navigating away from results.
         if cycle % 4 == 0:
             try:
-                await page.mouse.wheel(0, 650)
+                await page.mouse.wheel(0, 700)
             except Exception:
                 pass
         await page.wait_for_timeout(1000)
 
-    return [], last_body
+    return [], last_body, last_diagnostics
 
 
-async def _save_artifacts(page: Page, artifact_dir: Path, rows: list[dict], body: str) -> None:
+async def _save_artifacts(
+    page: Page,
+    artifact_dir: Path,
+    rows: list[dict],
+    body: str,
+    diagnostics: dict,
+) -> None:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     try:
         await page.screenshot(path=str(artifact_dir / "page.png"), full_page=True)
     except Exception:
         pass
     (artifact_dir / "page.txt").write_text(body or "", encoding="utf-8")
+    try:
+        html = await page.content()
+        (artifact_dir / "page.html").write_text(html, encoding="utf-8")
+    except Exception:
+        pass
+    (artifact_dir / "diagnostics.json").write_text(
+        json.dumps(diagnostics, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     payload = {
         "captured_at": datetime.now().isoformat(timespec="seconds"),
         "url": page.url,
         "rows": rows,
+        "diagnostics": diagnostics,
     }
     (artifact_dir / "result.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
 
-async def run(args: argparse.Namespace) -> int:
-    url = build_naver_url(args.origin, args.destination, args.depart, args.return_date)
-    artifact_dir = Path(args.artifact_dir)
-
-    print("==================================================")
-    print(" NAVER FLIGHTS independent visible POC")
-    print("==================================================")
-    print(f"route={args.origin.upper()}->{args.destination.upper()}->{args.origin.upper()}")
-    print(f"dates={args.depart}~{args.return_date}")
-    print("browser=Microsoft Edge (Playwright msedge channel)")
-    print("direct_only=True")
-    print("booking_navigation=False")
-    print(f"search_url={url}")
-    print("")
+async def collect_naver_visible_results(
+    *,
+    origin: str = DEFAULT_ORIGIN,
+    destination: str = DEFAULT_DESTINATION,
+    depart: str = DEFAULT_DEPART,
+    return_date: str = DEFAULT_RETURN,
+    navigation_timeout: int = 60,
+    result_timeout: int = 70,
+    artifact_dir: str | Path = "artifacts/naver-flight-poc",
+    headless: bool = False,
+    keep_open: int = 0,
+    failure_keep_open: int = 0,
+) -> NaverProbeResult:
+    url = build_naver_url(origin, destination, depart, return_date)
+    artifact_path = Path(artifact_dir)
 
     playwright = await async_playwright().start()
     browser = None
@@ -211,16 +388,17 @@ async def run(args: argparse.Namespace) -> int:
     page = None
     rows: list[dict] = []
     body = ""
+    diagnostics: dict = {"frames": [], "price_anchors": []}
     try:
         try:
             browser = await playwright.chromium.launch(
                 channel="msedge",
-                headless=False,
-                args=["--start-maximized"],
+                headless=headless,
+                args=[] if headless else ["--start-maximized"],
             )
         except Exception as exc:
             raise RuntimeError(
-                "Microsoft Edge could not be launched by Playwright. Update/install Edge and run 01 setup again."
+                "Microsoft Edge could not be launched by Playwright. Install/update Edge and rerun the BAT."
             ) from exc
 
         context = await browser.new_context(
@@ -230,53 +408,41 @@ async def run(args: argparse.Namespace) -> int:
         )
         page = await context.new_page()
         page.set_default_timeout(5000)
-        await page.goto(url, wait_until="domcontentloaded", timeout=args.navigation_timeout * 1000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=navigation_timeout * 1000)
         print(f"loaded_url={page.url}")
 
-        rows, body = await _wait_for_rows(page, args.result_timeout)
-        await _save_artifacts(page, artifact_dir, rows, body)
+        rows, body, diagnostics = await _wait_for_rows(page, result_timeout)
+        await _save_artifacts(page, artifact_path, rows, body, diagnostics)
 
         if not rows:
-            print("\n=== NAVER RESULT ===")
-            print("POC_STATUS=FAIL")
-            print("reason=no row-scoped direct flight price found before timeout")
-            print(f"final_url={page.url}")
-            print(f"artifact_dir={artifact_dir.resolve()}")
-            if args.failure_keep_open > 0:
-                await page.wait_for_timeout(args.failure_keep_open * 1000)
-            return 2
+            anchor_count = len(diagnostics.get("price_anchors") or [])
+            raise RuntimeError(
+                "Naver results are visible but no reliable flight row was extracted "
+                f"(visible price anchors found: {anchor_count})."
+            )
 
-        print("\n=== NAVER RESULT ===")
-        print("POC_STATUS=PASS")
-        print(f"direct_candidate_count={len(rows)}")
-        print(f"lowest_visible_direct_price={rows[0]['price']:,} KRW")
-        for index, row in enumerate(rows[:4], start=1):
-            times = row.get("times") or []
-            time_text = " -> ".join(times[:2]) if len(times) >= 2 else "time-unavailable"
-            compact = re.sub(r"\s+", " ", str(row.get("text") or ""))[:380]
-            print(f"candidate_{index}={row['price']:,} KRW | {time_text} | {compact}")
-        print(f"result_url={page.url}")
-        print("booking_navigation_performed=False")
-        print(f"artifact_dir={artifact_dir.resolve()}")
-        if args.keep_open > 0:
-            await page.wait_for_timeout(args.keep_open * 1000)
-        return 0
-    except Exception as exc:
+        if keep_open > 0:
+            await page.wait_for_timeout(keep_open * 1000)
+        return NaverProbeResult(
+            url=page.url,
+            rows=rows,
+            body=body,
+            diagnostics=diagnostics,
+            artifact_dir=artifact_path.resolve(),
+        )
+    except Exception:
         if page is not None:
             body = body or await _body_text(page)
-            await _save_artifacts(page, artifact_dir, rows, body)
-        print("\n=== NAVER RESULT ===")
-        print("POC_STATUS=FAIL")
-        print(f"error={type(exc).__name__}: {exc}")
-        if page is not None:
-            print(f"final_url={page.url}")
-            print(f"artifact_dir={artifact_dir.resolve()}")
-            if args.failure_keep_open > 0:
+            try:
+                await _save_artifacts(page, artifact_path, rows, body, diagnostics)
+            except Exception:
+                pass
+            if failure_keep_open > 0:
                 try:
-                    await page.wait_for_timeout(args.failure_keep_open * 1000)
+                    await page.wait_for_timeout(failure_keep_open * 1000)
                 except Exception:
                     pass
-        return 2
+        raise
     finally:
         if context is not None:
             try:
@@ -291,6 +457,61 @@ async def run(args: argparse.Namespace) -> int:
         await playwright.stop()
 
 
+def _print_rows(result: NaverProbeResult, max_rows: int = 4) -> None:
+    print("\n=== NAVER RESULT ===")
+    print("POC_STATUS=PASS")
+    print(f"direct_candidate_count={len(result.rows)}")
+    print(f"lowest_visible_direct_price={result.rows[0]['price']:,} KRW")
+    for index, row in enumerate(result.rows[:max_rows], start=1):
+        times = row.get("times") or []
+        time_text = " -> ".join(times[:2]) if len(times) >= 2 else "time-unavailable"
+        compact = re.sub(r"\s+", " ", str(row.get("text") or ""))[:420]
+        print(
+            f"candidate_{index}={row['price']:,} KRW | {time_text} | "
+            f"score={row.get('score')} | {compact}"
+        )
+    print(f"result_url={result.url}")
+    print("booking_navigation_performed=False")
+    print(f"artifact_dir={result.artifact_dir}")
+
+
+async def run(args: argparse.Namespace) -> int:
+    print("==================================================")
+    print(" NAVER FLIGHTS independent visible POC")
+    print("==================================================")
+    print(f"route={args.origin.upper()}->{args.destination.upper()}->{args.origin.upper()}")
+    print(f"dates={args.depart}~{args.return_date}")
+    print("browser=Microsoft Edge (Playwright msedge channel)")
+    print("direct_only=True")
+    print("booking_navigation=False")
+    print(f"search_url={build_naver_url(args.origin, args.destination, args.depart, args.return_date)}")
+    print("")
+
+    try:
+        result = await collect_naver_visible_results(
+            origin=args.origin,
+            destination=args.destination,
+            depart=args.depart,
+            return_date=args.return_date,
+            navigation_timeout=args.navigation_timeout,
+            result_timeout=args.result_timeout,
+            artifact_dir=args.artifact_dir,
+            headless=False,
+            keep_open=args.keep_open,
+            failure_keep_open=args.failure_keep_open,
+        )
+    except Exception as exc:
+        print("\n=== NAVER RESULT ===")
+        print("POC_STATUS=FAIL")
+        print(f"error={type(exc).__name__}: {exc}")
+        print(f"artifact_dir={Path(args.artifact_dir).resolve()}")
+        print("diagnostic_files=page.png,page.txt,page.html,diagnostics.json,result.json")
+        return 2
+
+    _print_rows(result)
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visible Naver Flights POC")
     parser.add_argument("--origin", default=DEFAULT_ORIGIN)
@@ -300,7 +521,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--navigation-timeout", type=int, default=60)
     parser.add_argument("--result-timeout", type=int, default=70)
     parser.add_argument("--keep-open", type=int, default=8)
-    parser.add_argument("--failure-keep-open", type=int, default=15)
+    parser.add_argument("--failure-keep-open", type=int, default=20)
     parser.add_argument("--artifact-dir", default="artifacts/naver-flight-poc")
     return parser.parse_args()
 
