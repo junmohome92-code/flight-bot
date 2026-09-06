@@ -44,6 +44,8 @@ Write-Host '  1 adult / Economy / KRW'
 Write-Host '  observer active before Cheapest click: YES'
 Write-Host '  text-node mutation capture: YES'
 Write-Host '  explicit Cheapest/최저가 click: YES'
+Write-Host '  fresh post-click control re-query: YES'
+Write-Host '  strong selected-state evidence: aria-selected/pressed/checked/current/data-state'
 Write-Host '  candidate + advertised stability gate: YES'
 Write-Host '  Returning full-navigation capture: YES'
 Write-Host '  stale coordinate click: NO'
@@ -56,7 +58,7 @@ Write-Host "  selection wait: $($env:GOOGLE_UI_SELECTION_WAIT_MS) ms"
 Write-Host "  booking wait: $($env:GOOGLE_UI_BOOKING_WAIT_MS) ms"
 Write-Host ''
 
-& $VenvPython 'scripts\google_booking_pointer_probe.py'
+& $VenvPython 'scripts\google_booking_pointer_probe_v5.py'
 if ($LASTEXITCODE -ne 0) {
     throw "Google UI navigation-safe booking probe failed with exit code $LASTEXITCODE. Check artifacts\google-ui-win."
 }

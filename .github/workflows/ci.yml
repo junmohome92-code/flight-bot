@@ -47,10 +47,10 @@ jobs:
       - run: pip install -c constraints.txt -e '.[dev]'
       - name: Install Chromium for synthetic lifecycle test
         run: python -m playwright install --with-deps chromium
-      - name: Verify transient text mutation and Returning full navigation
+      - name: Verify Cheapest click, transient mutation and Returning navigation
         env:
           RUN_BROWSER_CONTRACT_TESTS: "1"
-        run: pytest -q tests/test_google_browser_contract.py
+        run: pytest -q tests/test_google_browser_contract.py tests/test_google_cheapest_selection.py
 
   docker-smoke:
     runs-on: ubuntu-latest
