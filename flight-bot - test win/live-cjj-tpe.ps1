@@ -16,6 +16,7 @@ if ($Headless) {
 
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
+$env:PYTHONWARNINGS = 'ignore::SyntaxWarning'
 try { chcp 65001 > $null } catch { }
 
 $env:BROWSER_HEADLESS = 'false'
@@ -29,6 +30,7 @@ $env:GOOGLE_UI_DEPARTURE_CAPTURE_MS = '3500'
 $env:GOOGLE_UI_RETURN_CAPTURE_MS = '900'
 $env:GOOGLE_UI_PRICE_READY_WAIT_MS = '8000'
 $env:GOOGLE_UI_PRICE_RELOADS = '2'
+$env:GOOGLE_UI_RETURNING_RELOADS = '2'
 $env:GOOGLE_UI_BROWSER_RESTARTS = '1'
 
 $env:GOOGLE_UI_SEARCH_URL = 'https://www.google.com/travel/flights/search?tfs=CBwQAhoeEgoyMDI2LTA5LTE4agcIARIDQ0pKcgcIARIDVFBFGh4SCjIwMjYtMDktMjBqBwgBEgNUUEVyBwgBEgNDSkpAAUgBcAGCAQsI____________AZgBAQ&hl=en&gl=kr&curr=KRW'
@@ -44,6 +46,9 @@ Write-Host '  existing Edge startup tab reused: YES'
 Write-Host '  Cheapest selected before forced refresh: YES'
 Write-Host '  forced full refresh after Cheapest: 1'
 Write-Host '  additional Price unavailable recovery reloads: 2 max'
+Write-Host '  specific flight-card click target required: YES'
+Write-Host '  inner price/detail pointer action accepted: NO'
+Write-Host '  selected-outbound Returning load-error reloads: 2 max'
 Write-Host '  TargetClosed browser-session restart: 1'
 Write-Host '  same Edge profile retained across retries: YES'
 Write-Host '  observer active before Cheapest click: YES'
@@ -70,4 +75,4 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ''
 Write-Host 'Probe complete.'
-Write-Host 'Paste the tab-count/Cheapest-refresh/departure/return/Booking output and SUMMARY into the next ChatGPT chat.'
+Write-Host 'Paste the click-target/transition-recovery/departure/return/Booking output and SUMMARY into the next ChatGPT chat.'
