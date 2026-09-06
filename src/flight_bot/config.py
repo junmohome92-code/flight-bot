@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,7 +24,14 @@ class Settings(BaseSettings):
     google_language: str = "en"
     google_currency: str = "KRW"
     google_gl: str = "kr"
-    require_verified_alerts: bool = True
+
+    # Product alert policy.
+    # Alerts are based on the prices Google Flights actually displays on the
+    # round-trip result page. Checkout/OTA verification is intentionally not
+    # required for the current product scope.
+    require_verified_alerts: bool = False
+    alert_nonstop_only: bool = True
+    alert_max_offers: int = Field(default=4, ge=1, le=10)
 
     telegram_bot_token: str = ""
     telegram_allowed_chat_ids: str = ""
