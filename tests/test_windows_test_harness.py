@@ -43,7 +43,7 @@ def test_telegram_e2e_uses_dedicated_credential_file():
 
 def test_e2e_searches_before_it_sends_telegram():
     source = (SCRIPTS / "naver_telegram_e2e.py").read_text(encoding="utf-8")
-    search_pos = source.index("await collect_naver_visible_results")
+    search_pos = source.index("await collect_naver_api_results")
     send_pos = source.index('"sendMessage"')
     assert search_pos < send_pos
     assert "booking_navigation_performed=False" in source
@@ -60,8 +60,10 @@ def test_retired_provider_assets_are_absent():
     assert not (WIN / "notification-test-menu.ps1").exists()
 
 
-def test_naver_poc_stops_at_results_page():
+def test_naver_poc_stops_at_search_results_and_never_books():
     source = (SCRIPTS / "naver_flight_probe.py").read_text(encoding="utf-8")
     assert "booking_navigation=False" in source
     assert "booking_navigation_performed=False" in source
     assert "checkout" not in source.lower()
+    assert "searchFlights" in source
+    assert "text/event-stream" in source
