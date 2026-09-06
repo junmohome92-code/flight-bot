@@ -4,7 +4,7 @@ chcp 65001 >nul
 cd /d "%~dp0.."
 
 if not exist ".venv-provider-poc\Scripts\python.exe" (
-  echo [FIRST RUN] Preparing isolated Naver test environment automatically...
+  echo [FIRST RUN] Preparing isolated Naver SSE test environment automatically...
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup-and-unit-test.ps1"
   if errorlevel 1 (
     echo [ERROR] Automatic setup failed.
@@ -30,9 +30,9 @@ set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 
 echo ==================================================
-echo  NAVER -^> TELEGRAM E2E TEST
+echo  NAVER SSE -^> TELEGRAM E2E TEST
 echo  CJJ to TPE round trip / 2026-09-18 to 2026-09-20
-echo  Direct only / Visible Microsoft Edge / results only
+echo  Direct only / no browser / TOP 5 fare combinations
 echo ==================================================
 echo.
 
@@ -41,9 +41,9 @@ set RC=%ERRORLEVEL%
 
 echo.
 if "%RC%"=="0" (
-  echo NAVER -^> TELEGRAM E2E finished: PASS
+  echo NAVER SSE -^> TELEGRAM E2E finished: PASS
 ) else (
-  echo NAVER -^> TELEGRAM E2E finished: FAIL ^(exit %RC%^)
+  echo NAVER SSE -^> TELEGRAM E2E finished: FAIL ^(exit %RC%^)
   echo Check artifacts\naver-telegram-e2e\
 )
 echo.
