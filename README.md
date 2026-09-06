@@ -1,8 +1,23 @@
 # Flight Bot — Naver Flights E2E POC
 
-현재 단계는 **Naver Flights를 운영 가격 소스로 쓸 수 있는지 Windows에서 실검색 + Telegram 푸시까지 검증**하는 단계입니다.
+현재 단계는 **Naver Flights를 운영 가격 소스로 쓸 수 있는지 실제 가격 조회 + Telegram 푸시까지 검증**하는 단계입니다.
 
 Skyscanner는 실제 화면에서 bot challenge가 확인되어 후보에서 제외했습니다.
+
+## 현재 Naver 방식
+
+브라우저 DOM/CSS selector를 긁지 않습니다.
+
+```text
+flight-api.naver.com/flight/international/searchFlights
+POST JSON
+Accept: text/event-stream
+→ SSE 응답 수집
+→ itineraries + fareMappings 결합
+→ 직항 왕복 가격/편명/시간 추출
+```
+
+2026-09-06 GitHub Actions 실조회에서 고정 테스트 노선의 네이버 표시 최저가와 동일한 `319,620원`을 반환하는 것을 확인했습니다.
 
 ## 고정 테스트 조건
 
@@ -14,17 +29,6 @@ Skyscanner는 실제 화면에서 bot challenge가 확인되어 후보에서 제
 성인 1명
 일반석
 직항만
-```
-
-검색결과까지만 사용합니다.
-
-```text
-Naver Flights 검색결과 진입
-→ 화면에 보이는 가격 텍스트 탐색
-→ 가격 주변의 실제 항공편 결과 문맥 확인
-→ 직항 후보 최대 4개 정리
-→ 필요 시 Telegram 테스트 메시지 전송
-→ 종료
 ```
 
 예약/결제 페이지로 이동하지 않습니다.
@@ -41,12 +45,14 @@ flight-bot - test win\02-NAVER-flight-test.bat
 
 최초 실행이면 전용 환경 `.venv-provider-poc`을 자동 생성합니다.
 
-성공 기준:
+성공 기준 예시:
 
 ```text
 POC_STATUS=PASS
+source=NAVER_SSE_API
 direct_candidate_count=1 이상
-lowest_visible_direct_price=...
+lowest_direct_price=...
+naver_advertised_lowest_direct=...
 booking_navigation_performed=False
 ```
 
@@ -77,35 +83,25 @@ E2E 성공 기준:
 
 ```text
 E2E_STATUS=PASS
+source=NAVER_SSE_API
 telegram_message_sent=True
 booking_navigation_performed=False
 ```
 
-Telegram에는 `🧪 네이버 항공권 E2E 테스트`로 시작하는 메시지가 실제 전송됩니다. 이 테스트는 첫 번째 Chat ID 한 곳에만 보냅니다.
+Telegram에는 조회된 가격과 가는편/오는편 편명 및 시간이 실제 전송됩니다. 테스트는 첫 번째 Chat ID 한 곳에만 보냅니다.
 
 ## 실패 진단 자료
 
 가격 추출 테스트:
 
 ```text
-artifacts\naver-flight-poc\page.png
-artifacts\naver-flight-poc\page.txt
-artifacts\naver-flight-poc\page.html
+artifacts\naver-flight-poc\response.sse.txt
+artifacts\naver-flight-poc\response.json
 artifacts\naver-flight-poc\diagnostics.json
 artifacts\naver-flight-poc\result.json
 ```
 
-Telegram E2E:
-
-```text
-artifacts\naver-telegram-e2e\page.png
-artifacts\naver-telegram-e2e\page.txt
-artifacts\naver-telegram-e2e\page.html
-artifacts\naver-telegram-e2e\diagnostics.json
-artifacts\naver-telegram-e2e\result.json
-```
-
-현재 extractor는 특정 해시 CSS class 하나에 의존하지 않고, 화면에 보이는 가격 텍스트를 시작점으로 실제 항공편 결과 문맥을 찾습니다. iframe과 open shadow root도 함께 검사합니다. 신뢰할 수 있는 결과 행을 못 찾으면 Telegram을 보내지 않습니다.
+Telegram E2E도 동일한 형식으로 `artifacts\naver-telegram-e2e\` 아래에 저장합니다.
 
 ## 다음 단계
 
@@ -119,5 +115,3 @@ Naver 운영 Provider 통합
 → Ubuntu Docker 실검색 검증
 → main 병합
 ```
-
-순서로 진행합니다.
