@@ -9,7 +9,7 @@
 
 아직 어느 쪽도 운영 Provider로 확정하지 않습니다. 먼저 Windows에서 실제 검색결과 화면을 열고, **직항 왕복 가격을 행 단위로 안정적으로 읽을 수 있는지** 비교합니다.
 
-## 이번 POC의 고정 조건
+## 고정 테스트 조건
 
 ```text
 출발: CJJ (청주)
@@ -21,7 +21,7 @@
 직항만
 ```
 
-POC는 검색결과까지만 봅니다.
+두 POC 모두 검색결과까지만 봅니다.
 
 ```text
 검색결과 화면 열기
@@ -34,13 +34,7 @@ POC는 검색결과까지만 봅니다.
 
 예약/결제 단계로 이동하지 않습니다.
 
-## Windows 테스트
-
-처음 한 번:
-
-```text
-flight-bot - test win\01-setup-and-unit-test.cmd
-```
+## Windows — 그냥 BAT 더블클릭
 
 Naver Flights:
 
@@ -54,34 +48,28 @@ Skyscanner:
 flight-bot - test win\03-SKYSCANNER-flight-test.bat
 ```
 
-두 테스트 모두 **설치된 Microsoft Edge를 화면에 보이게 실행**합니다.
+최초 실행이라 `.venv-win`이 없으면 각 BAT가 준비 작업을 자동 실행합니다. `01`을 먼저 실행할 필요는 없습니다.
+
+수동 준비가 필요할 때만:
+
+```text
+flight-bot - test win\01-setup-and-unit-test.cmd
+```
+
+두 테스트 모두 **설치된 Microsoft Edge를 화면에 보이게 실행**하며 서로 독립적인 Python probe를 사용합니다.
 
 ## PASS 기준
 
-아래가 모두 충족되어야 합니다.
-
 ```text
 POC_STATUS=PASS
-직항 후보 1개 이상
-row-scoped 가격 추출 성공
-최저 직항 왕복가 출력
-예약/결제 페이지 이동 없음
-```
-
-결과 예시:
-
-```text
-POC_STATUS=PASS
-direct_candidate_count=2
-lowest_visible_direct_price=311,000 KRW
-candidate_1=...
-candidate_2=...
+direct_candidate_count=1 이상
+lowest_visible_direct_price=...
 booking_navigation_performed=False
 ```
 
-## 실패 시 자료
+실패하면 콘솔 전체를 복사해 주시면 됩니다.
 
-Naver:
+Naver 자료:
 
 ```text
 artifacts\naver-flight-poc\page.png
@@ -89,7 +77,7 @@ artifacts\naver-flight-poc\page.txt
 artifacts\naver-flight-poc\result.json
 ```
 
-Skyscanner:
+Skyscanner 자료:
 
 ```text
 artifacts\skyscanner-flight-poc\page.png
@@ -97,13 +85,11 @@ artifacts\skyscanner-flight-poc\page.txt
 artifacts\skyscanner-flight-poc\result.json
 ```
 
-실패하면 콘솔 로그와 `result.json`을 함께 확인하면 됩니다.
-
 ## 다음 단계
 
 두 POC 결과를 비교한 뒤 한 소스를 Primary로 선정합니다.
 
-선정 후에만 다음 작업을 진행합니다.
+선정 후에만:
 
 ```text
 운영 Provider 통합
@@ -113,4 +99,4 @@ artifacts\skyscanner-flight-poc\result.json
 → Ubuntu Docker 배포
 ```
 
-현재 POC 브랜치에서는 **푸시알림/서버 배포보다 Provider 안정성 검증이 우선**입니다.
+으로 넘어갑니다.
