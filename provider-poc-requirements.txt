@@ -1,0 +1,4 @@
+# Standalone Windows provider POC only.
+# Deliberately does not install the production flight-bot package.
+playwright==1.62.0
+pytest==8.4.2
