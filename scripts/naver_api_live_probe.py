@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sys
 import urllib.request
 
 
@@ -23,20 +22,8 @@ def build_payload() -> dict:
         "seatClass": "Y",
         "tripType": "RT",
         "itineraries": [
-            {
-                "departureLocationCode": "CJJ",
-                "departureLocationType": "airport",
-                "arrivalLocationCode": "TPE",
-                "arrivalLocationType": "airport",
-                "departureDate": "20260918",
-            },
-            {
-                "departureLocationCode": "TPE",
-                "departureLocationType": "airport",
-                "arrivalLocationCode": "CJJ",
-                "arrivalLocationType": "airport",
-                "departureDate": "20260920",
-            },
+            {"departureLocationCode": "CJJ", "departureLocationType": "airport", "arrivalLocationCode": "TPE", "arrivalLocationType": "airport", "departureDate": "20260918"},
+            {"departureLocationCode": "TPE", "departureLocationType": "airport", "arrivalLocationCode": "CJJ", "arrivalLocationType": "airport", "departureDate": "20260920"},
         ],
         "openReturnDays": 0,
         "flightFilter": {
@@ -65,11 +52,20 @@ def build_payload() -> dict:
     }
 
 
+def fares_from(data: dict) -> list[int]:
+    fares: list[int] = []
+    for mapping in data.get("fareMappings") or []:
+        for fare in mapping.get("fares") or []:
+            total = (fare.get("adult") or {}).get("totalFare")
+            if isinstance(total, (int, float)):
+                fares.append(int(total))
+    return fares
+
+
 def main() -> int:
-    body = json.dumps(build_payload(), separators=(",", ":")).encode("utf-8")
     request = urllib.request.Request(
         ENDPOINT,
-        data=body,
+        data=json.dumps(build_payload(), separators=(",", ":")).encode("utf-8"),
         method="POST",
         headers={
             "Content-Type": "application/json",
@@ -81,7 +77,6 @@ def main() -> int:
             "Pragma": "no-cache",
         },
     )
-
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             text = response.read().decode("utf-8", errors="replace")
@@ -91,54 +86,46 @@ def main() -> int:
         print(f"probe_error={type(exc).__name__}: {exc}")
         return 2
 
-    best = None
-    events = 0
+    valid: list[dict] = []
+    event_count = 0
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line.startswith("data:"):
             continue
-        events += 1
-        raw_json = line[5:].strip()
-        if not raw_json:
-            continue
+        event_count += 1
         try:
-            data = json.loads(raw_json)
-        except json.JSONDecodeError:
+            data = json.loads(line[5:].strip())
+        except (json.JSONDecodeError, TypeError):
             continue
         itineraries = data.get("itineraries") or []
-        fare_mappings = data.get("fareMappings") or []
-        if itineraries and fare_mappings:
-            if best is None or (
-                len(itineraries), len(fare_mappings)
-            ) > (
-                len(best.get("itineraries") or []),
-                len(best.get("fareMappings") or []),
-            ):
-                best = data
+        mappings = data.get("fareMappings") or []
+        fares = fares_from(data)
+        status = data.get("status") or {}
+        if itineraries and mappings:
+            valid.append(data)
+            print(
+                "event_valid="
+                f"{event_count} itineraries={len(itineraries)} mappings={len(mappings)} "
+                f"fares={len(fares)} lowest={min(fares) if fares else 'none'} "
+                f"completed={status.get('isCompleted')} "
+                f"status_lowest_direct={(status.get('lowestFare') or {}).get('direct')}"
+            )
 
-    print(f"sse_event_count={events}")
-    if not best:
+    print(f"sse_event_count={event_count}")
+    if not valid:
         print("valid_payload=False")
         return 3
 
-    itineraries = best.get("itineraries") or []
-    fare_mappings = best.get("fareMappings") or []
-    fares = []
-    for mapping in fare_mappings:
-        for fare in mapping.get("fares") or []:
-            adult = fare.get("adult") or {}
-            total = adult.get("totalFare")
-            if isinstance(total, (int, float)):
-                fares.append(int(total))
-
+    last = valid[-1]
+    all_seen_fares = [fare for data in valid for fare in fares_from(data)]
+    final_fares = fares_from(last)
     print("valid_payload=True")
-    print(f"itinerary_count={len(itineraries)}")
-    print(f"fare_mapping_count={len(fare_mappings)}")
-    print(f"fare_count={len(fares)}")
-    if fares:
-        print(f"lowest_total_fare={min(fares)}")
-        return 0
-    return 4
+    print(f"valid_event_count={len(valid)}")
+    print(f"last_itinerary_count={len(last.get('itineraries') or [])}")
+    print(f"last_fare_mapping_count={len(last.get('fareMappings') or [])}")
+    print(f"last_lowest_total_fare={min(final_fares) if final_fares else 'none'}")
+    print(f"all_events_lowest_total_fare={min(all_seen_fares) if all_seen_fares else 'none'}")
+    return 0 if final_fares else 4
 
 
 if __name__ == "__main__":
