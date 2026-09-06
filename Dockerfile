@@ -6,13 +6,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY pyproject.toml ./
+COPY pyproject.toml constraints.txt ./
 COPY src ./src
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir . \
+    && pip install --no-cache-dir -c constraints.txt . \
     && python -m playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /data /debug
+RUN useradd --create-home --uid 10001 app \
+    && mkdir -p /data /debug /data/browser-profile \
+    && chown -R app:app /data /debug /home/app
+
+USER app
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('HTTP_PORT', '8080') + '/health', timeout=3).read()" || exit 1
 
 CMD ["python", "-m", "flight_bot"]
