@@ -66,9 +66,16 @@ Assert-LastExitCode 'pip upgrade'
 & $VenvPython -m pip install -c 'constraints.txt' -e '.[dev]'
 Assert-LastExitCode 'Project dependency installation'
 
-Write-Host '[5/6] Installing Playwright Chromium ...'
-& $VenvPython -m playwright install chromium
-Assert-LastExitCode 'Playwright Chromium installation'
+Write-Host '[5/6] Checking Microsoft Edge ...'
+$EdgeCandidates = @(
+    (Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'),
+    (Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe'),
+    (Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\Application\msedge.exe')
+) | Where-Object { $_ -and (Test-Path $_) }
+if (-not $EdgeCandidates) {
+    throw 'Microsoft Edge was not found. Install/update Edge, then run this file again.'
+}
+Write-Host ("[5/6] Edge found: " + $EdgeCandidates[0])
 
 Write-Host '[6/6] Running unit tests ...'
 & $VenvPython -m pytest -q
@@ -76,4 +83,6 @@ Assert-LastExitCode 'pytest'
 
 Write-Host ''
 Write-Host 'Windows setup/unit test complete.'
-Write-Host 'Next: run 02-live-cjj-tpe-visible.cmd or .\live-cjj-tpe.ps1'
+Write-Host 'Next:'
+Write-Host '  02-NAVER-flight-test.bat'
+Write-Host '  03-SKYSCANNER-flight-test.bat'
