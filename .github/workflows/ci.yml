@@ -17,30 +17,33 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install only provider POC dependencies
+      - name: Install only Naver POC dependencies
         run: python -m pip install -r provider-poc-requirements.txt
-      - name: Compile standalone provider probes and contract tests
+      - name: Compile standalone Naver/Telegram probes and contract tests
         run: >-
           python -m compileall -q
           scripts/naver_flight_probe.py
-          scripts/skyscanner_flight_probe.py
+          scripts/naver_telegram_e2e.py
           scripts/edge_launch_smoke.py
           tests/test_provider_poc.py
           tests/test_windows_test_harness.py
-      - name: Run provider POC contracts
+      - name: Run Naver/Telegram POC contracts
         run: pytest -q tests/test_provider_poc.py tests/test_windows_test_harness.py
-      - name: Verify retired Google POC assets are absent
+      - name: Verify retired Google and Skyscanner POC assets are absent
         shell: bash
         run: |
           set -euo pipefail
           test -z "$(find scripts -maxdepth 1 -type f -name 'google_*' -print -quit)"
+          test -z "$(find scripts -maxdepth 1 -type f -name 'skyscanner_*' -print -quit)"
           test -z "$(find tests -maxdepth 1 -type f -name 'test_google_*' -print -quit)"
           test ! -e 'flight-bot - test win/02-live-cjj-tpe-visible.cmd'
           test ! -e 'flight-bot - test win/03-notification-test-menu.cmd'
+          test ! -e 'flight-bot - test win/03-SKYSCANNER-flight-test.bat'
           test ! -e 'flight-bot - test win/live-cjj-tpe.ps1'
           test ! -e 'flight-bot - test win/notification-test-menu.ps1'
           test -e 'flight-bot - test win/02-NAVER-flight-test.bat'
-          test -e 'flight-bot - test win/03-SKYSCANNER-flight-test.bat'
+          test -e 'flight-bot - test win/03-NAVER-TELEGRAM-E2E.bat'
+          test -e 'flight-bot - test win/telegram-test.env.example'
 
   poc-windows-edge:
     runs-on: windows-latest
@@ -49,17 +52,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install only provider POC dependencies
+      - name: Install only Naver POC dependencies
         run: python -m pip install -r provider-poc-requirements.txt
-      - name: Compile standalone provider probes and contract tests
+      - name: Compile standalone Naver/Telegram probes and contract tests
         run: >-
           python -m compileall -q
           scripts/naver_flight_probe.py
-          scripts/skyscanner_flight_probe.py
+          scripts/naver_telegram_e2e.py
           scripts/edge_launch_smoke.py
           tests/test_provider_poc.py
           tests/test_windows_test_harness.py
-      - name: Run provider POC contracts
+      - name: Run Naver/Telegram POC contracts
         run: python -m pytest -q tests/test_provider_poc.py tests/test_windows_test_harness.py
       - name: Verify installed Microsoft Edge can be launched by Playwright
         run: python scripts/edge_launch_smoke.py
