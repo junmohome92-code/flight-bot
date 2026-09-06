@@ -1,21 +1,18 @@
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
 COPY pyproject.toml constraints.txt ./
 COPY src ./src
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -c constraints.txt . \
-    && python -m playwright install --with-deps chromium \
-    && rm -rf /var/lib/apt/lists/*
+    && pip install --no-cache-dir -c constraints.txt .
 
 RUN useradd --create-home --uid 10001 app \
-    && mkdir -p /data /debug /data/browser-profile \
-    && chown -R app:app /data /debug /home/app
+    && mkdir -p /data \
+    && chown -R app:app /data /home/app
 
 USER app
 
