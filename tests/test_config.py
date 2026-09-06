@@ -1,6 +1,21 @@
 import pytest
 
-from flight_bot.config import Settings
+from flight_bot.config import SLOT_DESIGN_CAPACITY, Settings
+
+
+def test_default_search_cadence_daily_summary_and_slot_policy():
+    settings = Settings()
+    assert settings.search_interval_hours == 2
+    assert settings.scheduled_search_hours == list(range(0, 24, 2))
+    assert settings.daily_summary_hour == 8
+    assert settings.slot_active_limit == 5
+    assert SLOT_DESIGN_CAPACITY == 10
+
+
+def test_daily_summary_hour_must_reuse_a_scheduled_search():
+    settings = Settings(search_interval_hours=2, daily_summary_hour=9)
+    with pytest.raises(RuntimeError, match="DAILY_SUMMARY_HOUR"):
+        settings.validate_runtime_security()
 
 
 def test_production_token_requires_allowlist():
