@@ -40,11 +40,11 @@ def parse_krw_prices(
     min_price: int = MIN_KRW_PRICE,
     max_price: int = MAX_KRW_PRICE,
 ) -> list[int]:
-    """Return KRW amounts in the requested semantic range.
+    """Return KRW amounts in a caller-selected semantic range.
 
-    Departure/Booking totals use the normal 50k+ plausibility floor.  Returning
-    flight selectors may show a *price adjustment* such as +₩0 or +₩25,000,
-    so callers for that phase explicitly pass ``min_price=0``.
+    Departure and Booking totals normally use the 50k+ plausibility floor.
+    Returning-flight selectors may instead show an adjustment such as ``+₩0``
+    or ``+₩25,000`` and therefore explicitly use ``min_price=0``.
     """
     if not text:
         return []
@@ -54,7 +54,10 @@ def parse_krw_prices(
 
 
 def normalize_text(text: str | None) -> str:
-    return re.sub(r"\s+", " ", (text or "").replace("–", "-").replace("—", "-")).strip()
+    value = (text or "")
+    for dash in ("–", "—", "‑", "−"):
+        value = value.replace(dash, "-")
+    return re.sub(r"\s+", " ", value).strip()
 
 
 def _route_count(text: str, origin: str, destination: str) -> int:
@@ -116,7 +119,7 @@ def candidate_from_mapping(
     return UiFlightCandidate(price=price, row_text=row_text, seen_at_ms=seen_at_ms, candidate_id=candidate_id)
 
 
-def choose_lowest_candidate(
+def eligible_candidates(
     candidates: Sequence[Mapping[str, object]] | Iterable[Mapping[str, object]],
     *,
     origin: str,
@@ -124,8 +127,8 @@ def choose_lowest_candidate(
     advertised_price: int | None = None,
     allow_missing_route: bool = False,
     min_price: int = MIN_KRW_PRICE,
-) -> Mapping[str, object] | None:
-    """Choose the lowest preserved snapshot and fail closed on a cheaper hint."""
+) -> list[Mapping[str, object]]:
+    """Return trustworthy candidates ordered by price then first-seen time."""
     eligible: list[tuple[int, float, Mapping[str, object]]] = []
     for raw in candidates:
         candidate = candidate_from_mapping(raw, min_price=min_price)
@@ -142,10 +145,29 @@ def choose_lowest_candidate(
         if advertised_price is not None and candidate.price > advertised_price:
             continue
         eligible.append((candidate.price, candidate.seen_at_ms, raw))
-    if not eligible:
-        return None
     eligible.sort(key=lambda item: (item[0], item[1]))
-    return eligible[0][2]
+    return [item[2] for item in eligible]
+
+
+def choose_lowest_candidate(
+    candidates: Sequence[Mapping[str, object]] | Iterable[Mapping[str, object]],
+    *,
+    origin: str,
+    destination: str,
+    advertised_price: int | None = None,
+    allow_missing_route: bool = False,
+    min_price: int = MIN_KRW_PRICE,
+) -> Mapping[str, object] | None:
+    """Choose the lowest preserved snapshot and fail closed on a cheaper hint."""
+    eligible = eligible_candidates(
+        candidates,
+        origin=origin,
+        destination=destination,
+        advertised_price=advertised_price,
+        allow_missing_route=allow_missing_route,
+        min_price=min_price,
+    )
+    return eligible[0] if eligible else None
 
 
 def departure_capture_ready(
@@ -153,20 +175,33 @@ def departure_capture_ready(
     candidate_count: int,
     elapsed_ms: float,
     advertised_stable_ms: float,
+    candidate_low_stable_ms: float,
     loading: bool,
     capture_window_ms: int,
+    advertised_price: int | None,
+    candidate_lowest: int | None,
 ) -> bool:
-    """Prevent an early one-row loading snapshot from becoming the cheapest.
+    """Require both the Cheapest hint and row minimum to settle before clicking.
 
-    While Google is still fetching, require at least two concrete flight rows.
-    If fetching has finished, one row is enough (important for thin routes).
-    In both cases the advertised Cheapest value must have stopped changing for
-    a short debounce period.
+    A fixed timeout alone was unsafe: Google can briefly expose one expensive
+    row and later replace it with the real Cheapest result.  The gate therefore
+    requires the candidate minimum and advertised Cheapest value to remain
+    stable.  While Google still reports a loading state, at least two flight
+    cards and a longer debounce are required.
     """
-    if candidate_count < 1 or elapsed_ms < capture_window_ms:
+    if candidate_count < 1 or candidate_lowest is None:
         return False
-    if advertised_stable_ms < 250:
+    if elapsed_ms < capture_window_ms:
         return False
-    if loading and candidate_count < 2:
+    if advertised_price is not None and candidate_lowest > advertised_price:
         return False
+    if advertised_stable_ms < 500 or candidate_low_stable_ms < 500:
+        return False
+    if loading:
+        if candidate_count < 2:
+            return False
+        if elapsed_ms < max(capture_window_ms, 2200):
+            return False
+        if advertised_stable_ms < 700 or candidate_low_stable_ms < 700:
+            return False
     return True
