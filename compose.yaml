@@ -6,6 +6,15 @@ services:
     init: true
     env_file:
       - .env
+    environment:
+      # Container-specific values are pinned here so a .env copied from a
+      # Windows/local test cannot accidentally point Docker at a host path or
+      # try to launch a headed browser without a display server.
+      DATABASE_PATH: /data/flight_bot.db
+      BROWSER_HEADLESS: "true"
+      BROWSER_DEBUG_DIR: /debug
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
     shm_size: "1gb"
     security_opt:
       - no-new-privileges:true

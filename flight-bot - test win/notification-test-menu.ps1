@@ -4,16 +4,21 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $RepoRoot
 
+$ExpectedProvider = 'google-playwright-results-observed-accepted-flow'
+$ExpectedSlots = 10
+$ExpectedSearchHours = 2
+$ExpectedRecoveryReloads = 2
+
 function Read-DotEnv {
     param([string]$Path)
     $values = @{}
     foreach ($line in Get-Content -LiteralPath $Path) {
         $trimmed = $line.Trim()
         if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
-        $separator = $trimmed.IndexOf('=')
-        if ($separator -lt 1) { continue }
-        $key = $trimmed.Substring(0, $separator).Trim()
-        $value = $trimmed.Substring($separator + 1).Trim()
+        $i = $trimmed.IndexOf('=')
+        if ($i -lt 1) { continue }
+        $key = $trimmed.Substring(0, $i).Trim()
+        $value = $trimmed.Substring($i + 1).Trim()
         if ($value.Length -ge 2) {
             if (($value.StartsWith('"') -and $value.EndsWith('"')) -or
                 ($value.StartsWith("'") -and $value.EndsWith("'"))) {
@@ -25,7 +30,7 @@ function Read-DotEnv {
     return $values
 }
 
-function Test-Health {
+function Get-Health {
     param([string]$BaseUrl)
     try {
         return Invoke-RestMethod -Method Get -Uri "$BaseUrl/health" -TimeoutSec 4
@@ -36,43 +41,210 @@ function Test-Health {
 }
 
 function Wait-Health {
-    param([string]$BaseUrl, [int]$Seconds = 45)
+    param([string]$BaseUrl, [int]$Seconds = 60)
     for ($i = 0; $i -lt ($Seconds * 2); $i++) {
-        $health = Test-Health -BaseUrl $BaseUrl
+        $health = Get-Health -BaseUrl $BaseUrl
         if ($health) { return $health }
         Start-Sleep -Milliseconds 500
     }
     return $null
 }
 
+function Test-TcpPortInUse {
+    param([string]$HostName, [int]$Port)
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $task = $client.ConnectAsync($HostName, $Port)
+        if (-not $task.Wait(800)) { return $false }
+        return $client.Connected
+    }
+    catch {
+        return $false
+    }
+    finally {
+        $client.Close()
+    }
+}
+
+function Test-FlightBotDockerRunning {
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { return $false }
+    try {
+        $names = & docker ps --filter 'name=^/flight-bot$' --format '{{.Names}}' 2>$null
+        return [bool]($names | Where-Object { $_ -eq 'flight-bot' })
+    }
+    catch {
+        return $false
+    }
+}
+
+function Assert-RuntimeContract {
+    param($Health)
+    $errors = @()
+    if (-not $Health) { $errors += 'Health endpoint is unavailable.' }
+    else {
+        if ($Health.provider -ne $ExpectedProvider) {
+            $errors += "Provider mismatch. Expected '$ExpectedProvider', got '$($Health.provider)'."
+        }
+        if (-not [bool]$Health.provider_accepted_for_alerts) {
+            $errors += 'Runtime provider is not accepted for alerts.'
+        }
+        if (-not [bool]$Health.browser_search_storage_isolated) {
+            $errors += 'Browser search storage isolation is disabled.'
+        }
+        if (-not [bool]$Health.cheapest_selected_full_reload) {
+            $errors += 'Cheapest forced full reload contract is disabled.'
+        }
+        if ([int]$Health.price_unavailable_recovery_reloads -ne $ExpectedRecoveryReloads) {
+            $errors += "Price recovery reload count must be $ExpectedRecoveryReloads."
+        }
+        if ([int]$Health.slots_max -ne $ExpectedSlots) {
+            $errors += "Runtime slot limit must be $ExpectedSlots."
+        }
+        if ([int]$Health.slots_design_capacity -ne $ExpectedSlots) {
+            $errors += "Runtime slot design capacity must be $ExpectedSlots."
+        }
+        if ([int]$Health.search_interval_hours -ne $ExpectedSearchHours) {
+            $errors += "Search interval must be $ExpectedSearchHours hours."
+        }
+        if (-not [bool]$Health.admin_endpoint_enabled) {
+            $errors += 'Admin test endpoint is disabled.'
+        }
+        if (-not [bool]$Health.telegram_connected) {
+            $errors += 'Telegram notifier is not connected.'
+        }
+    }
+    if ($errors.Count -gt 0) {
+        Write-Host ''
+        Write-Host 'RUNTIME CONTRACT CHECK FAILED' -ForegroundColor Red
+        foreach ($item in $errors) { Write-Host " - $item" -ForegroundColor Red }
+        Write-Host ''
+        Write-Host 'A stale/older bot or bad notifier configuration may be running on this port.' -ForegroundColor Yellow
+        Write-Host 'Stop the old local process or run: docker compose down'
+        throw 'Runtime contract mismatch. Refusing a misleading notification test.'
+    }
+}
+
+function Assert-AdminAuth {
+    param([string]$BaseUrl, [string]$Secret)
+    try {
+        $probe = Invoke-RestMethod `
+            -Method Post `
+            -Uri "$BaseUrl/admin/check-slot/999999" `
+            -Headers @{ 'X-Flight-Bot-Secret' = $Secret } `
+            -TimeoutSec 10
+        if (-not $probe.accepted) {
+            throw 'Admin probe was not accepted.'
+        }
+        Write-Host '[preflight] Admin secret matches the running bot.' -ForegroundColor Green
+    }
+    catch {
+        throw 'ADMIN_SECRET does not match the running bot, or the admin endpoint is unreachable. Restart the bot after changing .env.'
+    }
+}
+
+function Assert-LocalEnv {
+    param([hashtable]$DotEnv)
+    $errors = @()
+    $admin = [string]$DotEnv['ADMIN_SECRET']
+    $token = [string]$DotEnv['TELEGRAM_BOT_TOKEN']
+    $chats = [string]$DotEnv['TELEGRAM_ALLOWED_CHAT_IDS']
+    if (-not $admin) { $errors += 'ADMIN_SECRET is empty.' }
+    if (-not $token) { $errors += 'TELEGRAM_BOT_TOKEN is empty.' }
+    if (-not $chats) { $errors += 'TELEGRAM_ALLOWED_CHAT_IDS is empty.' }
+    if ($chats -and $chats -notmatch '^-?\d+(\s*,\s*-?\d+)*$') {
+        $errors += 'TELEGRAM_ALLOWED_CHAT_IDS must contain numeric chat IDs separated by commas.'
+    }
+    if ($errors.Count -gt 0) {
+        Write-Host ''
+        Write-Host '.env PRECHECK FAILED' -ForegroundColor Red
+        foreach ($item in $errors) { Write-Host " - $item" -ForegroundColor Red }
+        Write-Host ''
+        Write-Host 'Required example:'
+        Write-Host 'TELEGRAM_BOT_TOKEN=123456:ABC...'
+        Write-Host 'TELEGRAM_ALLOWED_CHAT_IDS=123456789'
+        Write-Host 'ADMIN_SECRET=test123456789'
+        throw 'Fix .env and run this menu again.'
+    }
+}
+
+function Test-TelegramConfiguration {
+    param([string]$Token, [string]$ChatIds)
+    Write-Host '[preflight] Checking Telegram bot token ...'
+    try {
+        $me = Invoke-RestMethod -Method Get -Uri ("https://api.telegram.org/bot" + $Token + '/getMe') -TimeoutSec 10
+        if (-not $me.ok) { throw 'Telegram getMe returned ok=false.' }
+        Write-Host ("[preflight] Telegram bot OK: @" + $me.result.username) -ForegroundColor Green
+    }
+    catch {
+        Write-Host '[preflight] Telegram API check failed.' -ForegroundColor Yellow
+        Write-Host '           Verify the bot token and Internet connection before expecting an alert.' -ForegroundColor Yellow
+        return
+    }
+
+    foreach ($chatId in ($ChatIds -split ',')) {
+        $id = $chatId.Trim()
+        if (-not $id) { continue }
+        try {
+            $chat = Invoke-RestMethod -Method Get -Uri ("https://api.telegram.org/bot" + $Token + '/getChat?chat_id=' + $id) -TimeoutSec 10
+            if ($chat.ok) {
+                Write-Host ("[preflight] Telegram chat reachable: " + $id) -ForegroundColor Green
+            }
+        }
+        catch {
+            Write-Host ("[preflight] Chat ID may be wrong or the bot has not been started in chat: " + $id) -ForegroundColor Yellow
+        }
+    }
+}
+
+function Show-RuntimeLog {
+    param([bool]$DockerMode, [string]$StdoutPath, [string]$StderrPath)
+    Write-Host ''
+    Write-Host '=== RUNTIME SEARCH LOG (last 120 lines) ===' -ForegroundColor Cyan
+    if ($DockerMode) {
+        & docker compose logs --tail 120 flight-bot
+        return
+    }
+    if (Test-Path $StdoutPath) {
+        Get-Content -LiteralPath $StdoutPath -Encoding UTF8 -Tail 120
+    }
+    if (Test-Path $StderrPath) {
+        $err = Get-Content -LiteralPath $StderrPath -Encoding UTF8 -Tail 80
+        if ($err) {
+            Write-Host '--- stderr ---' -ForegroundColor Yellow
+            $err
+        }
+    }
+}
+
 function Invoke-AdminPost {
-    param(
-        [string]$BaseUrl,
-        [string]$Secret,
-        [string]$Path,
-        [int]$TimeoutSec = 240
-    )
-    Write-Host ""
+    param([string]$BaseUrl, [string]$Secret, [string]$Path, [int]$TimeoutSec = 320)
+    Write-Host ''
     Write-Host "POST $Path" -ForegroundColor Cyan
     $response = Invoke-RestMethod `
         -Method Post `
         -Uri "$BaseUrl$Path" `
         -Headers @{ 'X-Flight-Bot-Secret' = $Secret } `
         -TimeoutSec $TimeoutSec
-    $response | ConvertTo-Json -Depth 8
+    Write-Host ($response | ConvertTo-Json -Depth 8)
     return $response
 }
 
 function Read-SlotId {
     while ($true) {
         $raw = Read-Host 'Slot number (1-10)'
-        $slotId = 0
-        if ([int]::TryParse($raw, [ref]$slotId) -and $slotId -ge 1 -and $slotId -le 10) {
-            return $slotId
+        $slot = 0
+        if ([int]::TryParse($raw, [ref]$slot) -and $slot -ge 1 -and $slot -le 10) {
+            return $slot
         }
         Write-Host 'Enter a number from 1 to 10.' -ForegroundColor Yellow
     }
 }
+
+Write-Host '=================================================='
+Write-Host ' Flight Bot notification test - compatibility mode'
+Write-Host '=================================================='
+Write-Host ("PowerShell: " + $PSVersionTable.PSVersion.ToString())
+Write-Host ("Repository: " + $RepoRoot)
 
 $EnvPath = Join-Path $RepoRoot '.env'
 $EnvExamplePath = Join-Path $RepoRoot '.env.example'
@@ -80,157 +252,190 @@ if (-not (Test-Path $EnvPath)) {
     Copy-Item -LiteralPath $EnvExamplePath -Destination $EnvPath
     Write-Host ''
     Write-Host '.env was created from .env.example.' -ForegroundColor Yellow
-    Write-Host 'Open .env and fill these three values, then run this menu again:'
-    Write-Host '  TELEGRAM_BOT_TOKEN=...'
-    Write-Host '  TELEGRAM_ALLOWED_CHAT_IDS=...'
-    Write-Host '  ADMIN_SECRET=any-long-random-string'
+    Write-Host 'Fill these values and run 03-notification-test-menu.cmd again:'
+    Write-Host 'TELEGRAM_BOT_TOKEN=...'
+    Write-Host 'TELEGRAM_ALLOWED_CHAT_IDS=...'
+    Write-Host 'ADMIN_SECRET=test123456789'
     exit 2
 }
 
 $DotEnv = Read-DotEnv -Path $EnvPath
-$Port = if ($DotEnv.ContainsKey('HTTP_PORT') -and $DotEnv['HTTP_PORT']) { $DotEnv['HTTP_PORT'] } else { '8080' }
-$AdminSecret = if ($DotEnv.ContainsKey('ADMIN_SECRET')) { $DotEnv['ADMIN_SECRET'] } else { '' }
-$TelegramToken = if ($DotEnv.ContainsKey('TELEGRAM_BOT_TOKEN')) { $DotEnv['TELEGRAM_BOT_TOKEN'] } else { '' }
-$TelegramChats = if ($DotEnv.ContainsKey('TELEGRAM_ALLOWED_CHAT_IDS')) { $DotEnv['TELEGRAM_ALLOWED_CHAT_IDS'] } else { '' }
+Assert-LocalEnv -DotEnv $DotEnv
+
+$PortText = [string]$DotEnv['HTTP_PORT']
+if (-not $PortText) { $PortText = '8080' }
+$Port = 0
+if (-not [int]::TryParse($PortText, [ref]$Port) -or $Port -lt 1 -or $Port -gt 65535) {
+    throw 'HTTP_PORT must be an integer from 1 to 65535.'
+}
 $BaseUrl = "http://127.0.0.1:$Port"
+$AdminSecret = [string]$DotEnv['ADMIN_SECRET']
+$TelegramToken = [string]$DotEnv['TELEGRAM_BOT_TOKEN']
+$TelegramChats = [string]$DotEnv['TELEGRAM_ALLOWED_CHAT_IDS']
 
-if (-not $AdminSecret) {
-    Write-Host 'ADMIN_SECRET is empty in .env. Set it before notification testing.' -ForegroundColor Red
-    exit 3
-}
-if (-not $TelegramToken -or -not $TelegramChats) {
-    Write-Host 'Telegram token/chat ID is not configured in .env.' -ForegroundColor Red
-    Write-Host 'Set TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_CHAT_IDS first.'
-    exit 4
-}
+Test-TelegramConfiguration -Token $TelegramToken -ChatIds $TelegramChats
 
-$VenvPython = Join-Path $RepoRoot '.venv-win\Scripts\python.exe'
 $Artifacts = Join-Path $RepoRoot 'artifacts'
-New-Item -ItemType Directory -Force -Path $Artifacts | Out-Null
-$StartedLocalProcess = $null
-$StartedDocker = $false
+$RuntimeDebug = Join-Path $Artifacts 'runtime-alert-test'
+New-Item -ItemType Directory -Force -Path $RuntimeDebug | Out-Null
+$StdoutPath = Join-Path $RuntimeDebug 'bot.stdout.log'
+$StderrPath = Join-Path $RuntimeDebug 'bot.stderr.log'
+$VenvPython = Join-Path $RepoRoot '.venv-win\Scripts\python.exe'
+$StartedLocal = $null
+$DockerMode = $false
 
-$health = Test-Health -BaseUrl $BaseUrl
-if (-not $health) {
+$health = Get-Health -BaseUrl $BaseUrl
+if ($health) {
+    Write-Host ''
+    Write-Host '[preflight] Existing Flight Bot runtime detected.' -ForegroundColor Yellow
+    Assert-RuntimeContract -Health $health
+    Assert-AdminAuth -BaseUrl $BaseUrl -Secret $AdminSecret
+    $DockerMode = Test-FlightBotDockerRunning
+    if ($DockerMode) {
+        Write-Host '[preflight] Existing runtime source: Docker container flight-bot' -ForegroundColor Green
+    }
+    else {
+        Write-Host '[preflight] Existing runtime source: local/external process' -ForegroundColor Green
+    }
+    Write-Host '[preflight] Existing runtime matches the required contract.' -ForegroundColor Green
+}
+else {
+    if (Test-TcpPortInUse -HostName '127.0.0.1' -Port $Port) {
+        throw "Port $Port is already in use, but it is not a compatible Flight Bot health endpoint. Stop that process first."
+    }
+
     Write-Host ''
     Write-Host 'Flight Bot is not running.' -ForegroundColor Yellow
-    Write-Host '  1. Start local Windows bot'
-    Write-Host '  2. Start Docker Compose bot'
-    Write-Host '  0. Exit'
-    $mode = Read-Host 'Select'
+    Write-Host '1. Start LOCAL Windows runtime (visible browser)'
+    Write-Host '2. Start DOCKER runtime (headless browser)'
+    Write-Host '0. Exit'
+    $runMode = Read-Host 'Select'
 
-    if ($mode -eq '1') {
+    if ($runMode -eq '1') {
         if (-not (Test-Path $VenvPython)) {
-            Write-Host 'Windows virtual environment not found. Run 01-setup-and-unit-test.cmd first.' -ForegroundColor Red
-            exit 5
+            throw 'Windows virtual environment not found. Run 01-setup-and-unit-test.cmd first.'
         }
+        Remove-Item -LiteralPath $StdoutPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $StderrPath -Force -ErrorAction SilentlyContinue
 
         $oldDb = $env:DATABASE_PATH
         $oldHeadless = $env:BROWSER_HEADLESS
+        $oldDebug = $env:BROWSER_DEBUG_DIR
+        $oldUnbuffered = $env:PYTHONUNBUFFERED
+        $oldUtf8 = $env:PYTHONUTF8
+        $oldIoEncoding = $env:PYTHONIOENCODING
         try {
             $env:DATABASE_PATH = Join-Path $Artifacts 'notification-test.db'
             $env:BROWSER_HEADLESS = 'false'
-            $stdout = Join-Path $Artifacts 'notification-test-bot.stdout.log'
-            $stderr = Join-Path $Artifacts 'notification-test-bot.stderr.log'
-            $StartedLocalProcess = Start-Process `
+            $env:BROWSER_DEBUG_DIR = $RuntimeDebug
+            $env:PYTHONUNBUFFERED = '1'
+            $env:PYTHONUTF8 = '1'
+            $env:PYTHONIOENCODING = 'utf-8'
+            $StartedLocal = Start-Process `
                 -FilePath $VenvPython `
                 -ArgumentList @('-m', 'flight_bot') `
                 -WorkingDirectory $RepoRoot `
-                -RedirectStandardOutput $stdout `
-                -RedirectStandardError $stderr `
+                -RedirectStandardOutput $StdoutPath `
+                -RedirectStandardError $StderrPath `
                 -PassThru
         }
         finally {
             if ($null -eq $oldDb) { Remove-Item Env:DATABASE_PATH -ErrorAction SilentlyContinue } else { $env:DATABASE_PATH = $oldDb }
             if ($null -eq $oldHeadless) { Remove-Item Env:BROWSER_HEADLESS -ErrorAction SilentlyContinue } else { $env:BROWSER_HEADLESS = $oldHeadless }
+            if ($null -eq $oldDebug) { Remove-Item Env:BROWSER_DEBUG_DIR -ErrorAction SilentlyContinue } else { $env:BROWSER_DEBUG_DIR = $oldDebug }
+            if ($null -eq $oldUnbuffered) { Remove-Item Env:PYTHONUNBUFFERED -ErrorAction SilentlyContinue } else { $env:PYTHONUNBUFFERED = $oldUnbuffered }
+            if ($null -eq $oldUtf8) { Remove-Item Env:PYTHONUTF8 -ErrorAction SilentlyContinue } else { $env:PYTHONUTF8 = $oldUtf8 }
+            if ($null -eq $oldIoEncoding) { Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue } else { $env:PYTHONIOENCODING = $oldIoEncoding }
         }
-        Write-Host "Local bot started. PID=$($StartedLocalProcess.Id)"
     }
-    elseif ($mode -eq '2') {
+    elseif ($runMode -eq '2') {
         if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-            Write-Host 'Docker command was not found.' -ForegroundColor Red
-            exit 6
+            throw 'Docker command not found.'
         }
-        Write-Host 'Building and starting Docker Compose ...'
+        & docker info *> $null
+        if ($LASTEXITCODE -ne 0) { throw 'Docker engine is not running.' }
+        & docker compose config *> $null
+        if ($LASTEXITCODE -ne 0) { throw 'docker compose config validation failed.' }
+        $DockerMode = $true
         & docker compose up -d --build
-        if ($LASTEXITCODE -ne 0) {
-            throw "docker compose up failed with exit code $LASTEXITCODE"
-        }
-        $StartedDocker = $true
+        if ($LASTEXITCODE -ne 0) { throw 'docker compose up failed.' }
     }
     else {
         exit 0
     }
 
-    $health = Wait-Health -BaseUrl $BaseUrl -Seconds 60
+    $health = Wait-Health -BaseUrl $BaseUrl -Seconds 75
     if (-not $health) {
-        Write-Host "Bot did not become healthy at $BaseUrl" -ForegroundColor Red
-        Write-Host "Check artifacts logs or run: docker compose logs --tail 200 flight-bot"
-        exit 7
+        Show-RuntimeLog -DockerMode $DockerMode -StdoutPath $StdoutPath -StderrPath $StderrPath
+        throw "Bot health check failed at $BaseUrl"
+    }
+    Assert-RuntimeContract -Health $health
+    Assert-AdminAuth -BaseUrl $BaseUrl -Secret $AdminSecret
+
+    if ($runMode -eq '1' -and [bool]$health.browser_headless) {
+        throw 'Local visible test unexpectedly started in headless mode.'
+    }
+    if ($runMode -eq '2' -and -not [bool]$health.browser_headless) {
+        throw 'Docker test unexpectedly started in headed mode.'
     }
 }
 
 Write-Host ''
-Write-Host '=============================================='
-Write-Host ' Flight Bot notification test menu'
-Write-Host '=============================================='
+Write-Host '=================================================='
+Write-Host ' Runtime ready'
+Write-Host '=================================================='
 Write-Host "HTTP: $BaseUrl"
+Write-Host "Provider: $($health.provider)"
 Write-Host "Slots: $($health.slots_used)/$($health.slots_max)"
-Write-Host "Search interval: $($health.search_interval_hours)h"
+Write-Host "Search interval: $($health.search_interval_hours) hours"
 Write-Host "Daily summary hour: $($health.daily_summary_hour):00"
-Write-Host "Isolated search storage: $($health.browser_search_storage_isolated)"
+Write-Host "Browser headless: $($health.browser_headless)"
+Write-Host "Storage isolated: $($health.browser_search_storage_isolated)"
+Write-Host "Cheapest forced reload: $($health.cheapest_selected_full_reload)"
+Write-Host "Price recovery reloads: $($health.price_unavailable_recovery_reloads)"
+Write-Host "Telegram connected: $($health.telegram_connected)"
 Write-Host ''
-Write-Host 'Before testing an empty DB, send this in Telegram:' -ForegroundColor Yellow
+Write-Host 'If the isolated test DB has no slot, send this in Telegram:' -ForegroundColor Yellow
 Write-Host '/flight add CJJ TPE 2026-09-18 2026-09-20 999999'
-Write-Host 'Use a high target such as 999999 to make the first target-alert test easy.'
+Write-Host 'Then use menu option 2 with slot 1.'
 
 :MenuLoop while ($true) {
     Write-Host ''
-    Write-Host '1. Health / slot status'
+    Write-Host '1. Show health / runtime contract'
     Write-Host '2. Test TARGET alert for one slot (real Google search)'
-    Write-Host '3. Test DAILY summary for one slot (real Google search, target latch untouched)'
-    Write-Host '4. Start normal target scan for ALL enabled slots'
-    Write-Host '5. Start forced daily summary for ALL enabled slots (target latches untouched)'
-    Write-Host '6. Show Telegram test commands'
+    Write-Host '3. Test DAILY summary for one slot (real Google search)'
+    Write-Host '4. Show runtime search logs'
     Write-Host '0. Exit'
     $choice = Read-Host 'Select'
 
     try {
         switch ($choice) {
             '1' {
-                $health = Test-Health -BaseUrl $BaseUrl
-                if (-not $health) {
-                    Write-Host 'Bot is not reachable.' -ForegroundColor Red
-                } else {
-                    $health | ConvertTo-Json -Depth 6
-                }
+                $health = Get-Health -BaseUrl $BaseUrl
+                Assert-RuntimeContract -Health $health
+                Write-Host ($health | ConvertTo-Json -Depth 8)
             }
             '2' {
-                $slotId = Read-SlotId
-                Write-Host 'This performs a REAL Google Flights search.' -ForegroundColor Yellow
-                Write-Host 'If the slot is ARMED and price <= target, the one-shot target alert will be consumed.'
-                Invoke-AdminPost -BaseUrl $BaseUrl -Secret $AdminSecret -Path "/admin/check-slot/$slotId" -TimeoutSec 300 | Out-Null
+                $slot = Read-SlotId
+                if ($health.browser_headless) {
+                    Write-Host 'Docker/headless mode: browser actions are not visible. Use logs for stage verification.' -ForegroundColor Yellow
+                }
+                else {
+                    Write-Host 'Expected visible flow: Cheapest click -> forced full reload -> direct result capture.' -ForegroundColor Yellow
+                }
+                Invoke-AdminPost -BaseUrl $BaseUrl -Secret $AdminSecret -Path "/admin/check-slot/$slot" -TimeoutSec 320 | Out-Null
+                Start-Sleep -Milliseconds 500
+                Show-RuntimeLog -DockerMode $DockerMode -StdoutPath $StdoutPath -StderrPath $StderrPath
             }
             '3' {
-                $slotId = Read-SlotId
-                Write-Host 'This performs a REAL Google Flights search and forces the regular summary.' -ForegroundColor Yellow
-                Write-Host 'It does NOT consume/re-arm the one-shot target alert state.'
-                Invoke-AdminPost -BaseUrl $BaseUrl -Secret $AdminSecret -Path "/admin/daily-summary/$slotId" -TimeoutSec 300 | Out-Null
+                $slot = Read-SlotId
+                Write-Host 'This forces one daily summary and does not consume/re-arm the one-shot target latch.' -ForegroundColor Yellow
+                Invoke-AdminPost -BaseUrl $BaseUrl -Secret $AdminSecret -Path "/admin/daily-summary/$slot" -TimeoutSec 320 | Out-Null
+                Start-Sleep -Milliseconds 500
+                Show-RuntimeLog -DockerMode $DockerMode -StdoutPath $StdoutPath -StderrPath $StderrPath
             }
             '4' {
-                Invoke-AdminPost -BaseUrl $BaseUrl -Secret $AdminSecret -Path '/admin/check-all' -TimeoutSec 30 | Out-Null
-                Write-Host 'All-slot scan started in background. Watch Telegram and /health scan_active.'
-            }
-            '5' {
-                Invoke-AdminPost -BaseUrl $BaseUrl -Secret $AdminSecret -Path '/admin/daily-summary' -TimeoutSec 30 | Out-Null
-                Write-Host 'All-slot daily-summary scan started in background. Target alert latches are untouched.'
-            }
-            '6' {
-                Write-Host '/flight add CJJ TPE 2026-09-18 2026-09-20 999999'
-                Write-Host '/flight list'
-                Write-Host '/flight target 1 999998   # explicitly re-arms target alert once'
-                Write-Host '/flight check 1           # manual result only, no alert'
-                Write-Host '/flight delete 1'
+                Show-RuntimeLog -DockerMode $DockerMode -StdoutPath $StdoutPath -StderrPath $StderrPath
             }
             '0' {
                 break MenuLoop
@@ -241,21 +446,21 @@ Write-Host 'Use a high target such as 999999 to make the first target-alert test
         }
     }
     catch {
-        Write-Host "TEST ERROR: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host ("TEST ERROR: " + $_.Exception.Message) -ForegroundColor Red
+        Show-RuntimeLog -DockerMode $DockerMode -StdoutPath $StdoutPath -StderrPath $StderrPath
     }
 }
 
-if ($StartedLocalProcess -and -not $StartedLocalProcess.HasExited) {
+if ($StartedLocal -and -not $StartedLocal.HasExited) {
     $stop = Read-Host 'Stop the local bot started by this menu? (y/N)'
     if ($stop -match '^[Yy]$') {
-        Stop-Process -Id $StartedLocalProcess.Id -Force
+        Stop-Process -Id $StartedLocal.Id -Force
         Write-Host 'Local bot stopped.'
-    } else {
-        Write-Host "Local bot left running. PID=$($StartedLocalProcess.Id)"
+    }
+    else {
+        Write-Host ("Local bot left running. PID=" + $StartedLocal.Id)
     }
 }
-
-if ($StartedDocker) {
-    Write-Host 'Docker was started by this menu and is left running.'
-    Write-Host 'Stop later with: docker compose down'
+if ($DockerMode) {
+    Write-Host 'Docker runtime may still be running. Stop it with: docker compose down'
 }
