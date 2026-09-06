@@ -46,8 +46,8 @@ class _FakeBrowser:
 
 
 @pytest.mark.asyncio
-async def test_each_price_search_gets_a_fresh_context_and_discards_previous_storage():
-    settings = Settings(browser_timeout_ms=12345, browser_block_assets=False)
+async def test_parallel_price_searches_get_distinct_live_contexts():
+    settings = Settings(_env_file=None, browser_timeout_ms=12345, browser_block_assets=False)
     session = PlaywrightBrowserSession(settings)
     browser = _FakeBrowser()
 
@@ -57,21 +57,20 @@ async def test_each_price_search_gets_a_fresh_context_and_discards_previous_stor
     session._ensure_started = fake_started  # type: ignore[method-assign]
 
     first = await session.new_page()
-    first_context = first.context
     second = await session.new_page()
-    second_context = second.context
 
-    assert first_context is not second_context
-    assert first_context.closed is True
-    assert second_context.closed is False
+    assert first.context is not second.context
+    assert first.context.closed is False
+    assert second.context.closed is False
     assert first.timeout == 12345
     assert second.timeout == 12345
     assert len(browser.contexts) == 2
+    assert len(session._contexts) == 2
 
 
 @pytest.mark.asyncio
-async def test_release_page_closes_its_whole_context():
-    settings = Settings(browser_block_assets=False)
+async def test_release_page_closes_only_its_own_context():
+    settings = Settings(_env_file=None, browser_block_assets=False)
     session = PlaywrightBrowserSession(settings)
     browser = _FakeBrowser()
 
@@ -79,10 +78,12 @@ async def test_release_page_closes_its_whole_context():
         return browser
 
     session._ensure_started = fake_started  # type: ignore[method-assign]
-    page = await session.new_page()
-    context = page.context
+    first = await session.new_page()
+    second = await session.new_page()
 
-    await session.release_page(page)
+    await session.release_page(first)
 
-    assert context.closed is True
-    assert context not in session._contexts
+    assert first.context.closed is True
+    assert second.context.closed is False
+    assert first.context not in session._contexts
+    assert second.context in session._contexts
