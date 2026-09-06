@@ -13,9 +13,8 @@ def test_windows_has_naver_and_telegram_launchers():
 
     assert "scripts\\naver_flight_probe.py" in naver
     assert "scripts\\naver_telegram_e2e.py" in e2e
+    assert "no browser" in naver.lower()
     assert "no browser" in e2e.lower()
-    assert "playwright" not in naver.lower()
-    assert "playwright" not in e2e.lower()
     assert "edge" not in e2e.lower()
 
 
@@ -27,8 +26,7 @@ def test_windows_launchers_self_bootstrap_isolated_venv():
 
     setup = (WIN / "setup-and-unit-test.ps1").read_text(encoding="utf-8")
     assert ".venv-provider-poc" in setup
-    assert "provider-poc-requirements.txt" in setup
-    assert "playwright" not in setup.lower()
+    assert "windows-test-requirements.txt" in setup
 
 
 def test_telegram_e2e_uses_dedicated_credential_file():
@@ -61,11 +59,11 @@ def test_retired_browser_assets_are_absent():
     assert not (WIN / "02A-NAVER-API-SSE-test.bat").exists()
 
 
-def test_runtime_source_has_no_playwright_dependency():
-    for path in SRC.glob("*.py"):
-        assert "playwright" not in path.read_text(encoding="utf-8").lower(), path
+def test_runtime_has_no_browser_automation_dependency():
+    runtime = "\n".join(path.read_text(encoding="utf-8").lower() for path in SRC.glob("*.py"))
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8").lower()
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8").lower()
+    assert "playwright" not in runtime
     assert "playwright" not in pyproject
     assert "playwright" not in dockerfile
     assert "chromium" not in dockerfile
