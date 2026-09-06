@@ -33,12 +33,15 @@ if (-not $env:ALERT_MAX_OFFERS) {
     $env:ALERT_MAX_OFFERS = '4'
 }
 
-$env:GOOGLE_UI_SEARCH_URL = 'https://www.google.com/travel/flights/search?tfs=CBwQAhoeEgoyMDI2LTA5LTE4agcIARIDQ0pKcgcIARIDVFBFGh4SCjIwMjYtMDktMjBqBwgBEgNUUEVyBwgBEgNDSkpAAUgBcAGCAQsI____________AZgBAQ&hl=en&gl=kr&curr=KRW'
-
+# The Python probe now builds the URL through the exact same production query
+# builder used by scheduled/manual alerts. Never keep a second hard-coded TFS
+# URL here or the acceptance/runtime implementations can drift again.
+Remove-Item Env:GOOGLE_UI_SEARCH_URL -ErrorAction SilentlyContinue
 Remove-Item Env:BROWSER_CHANNEL -ErrorAction SilentlyContinue
 Remove-Item Env:GOOGLE_UI_CHEAPEST_URL -ErrorAction SilentlyContinue
 
 Write-Host 'Google Flights direct-results alert acceptance'
+Write-Host '  production query contract: accepted-tfs-v1'
 Write-Host '  CJJ -> TPE -> CJJ'
 Write-Host '  2026-09-18 ~ 2026-09-20'
 Write-Host '  1 adult / Economy / KRW'
