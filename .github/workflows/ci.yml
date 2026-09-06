@@ -55,6 +55,7 @@ jobs:
           tests/test_google_acceptance_structure.py
           tests/test_google_browser_contract.py
           tests/test_google_cheapest_selection.py
+          tests/test_google_departure_transition.py
           tests/test_google_price_unavailable_recovery.py
 
   docker-smoke:
