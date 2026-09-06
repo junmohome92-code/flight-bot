@@ -42,29 +42,29 @@ else {
     throw 'Python is not installed. Install Python 3.12 from python.org, then run this file again.'
 }
 
-$VenvPath = Join-Path $RepoRoot '.venv-win'
+$VenvPath = Join-Path $RepoRoot '.venv-provider-poc'
 $VenvPython = Join-Path $VenvPath 'Scripts\python.exe'
 
 if (-not (Test-Path $VenvPython)) {
     if (Test-Path $VenvPath) {
-        Write-Host '[3/6] Removing incomplete .venv-win from previous failed setup ...'
+        Write-Host '[3/6] Removing incomplete .venv-provider-poc ...'
         Remove-Item -Recurse -Force $VenvPath
     }
-    Write-Host '[3/6] Creating .venv-win ...'
+    Write-Host '[3/6] Creating isolated .venv-provider-poc ...'
     & $PythonLauncher @PythonArgs -m venv $VenvPath
     Assert-LastExitCode 'Virtual environment creation'
     if (-not (Test-Path $VenvPython)) {
         throw "Virtual environment creation did not produce $VenvPython"
     }
 } else {
-    Write-Host '[3/6] Reusing existing .venv-win'
+    Write-Host '[3/6] Reusing isolated .venv-provider-poc'
 }
 
-Write-Host '[4/6] Installing provider POC dependencies ...'
+Write-Host '[4/6] Installing only provider POC dependencies ...'
 & $VenvPython -m pip install --upgrade pip
 Assert-LastExitCode 'pip upgrade'
-& $VenvPython -m pip install -c 'constraints.txt' -e '.[dev]'
-Assert-LastExitCode 'Project dependency installation'
+& $VenvPython -m pip install -r 'provider-poc-requirements.txt'
+Assert-LastExitCode 'provider POC dependency installation'
 
 Write-Host '[5/6] Checking Microsoft Edge ...'
 $EdgeCandidates = @(
