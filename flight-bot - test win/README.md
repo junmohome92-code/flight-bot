@@ -1,6 +1,22 @@
 # flight-bot - test win
 
-Windows 10/11에서 `flight-bot`을 쉽게 검증하는 전용 폴더입니다.
+Windows 10/11에서 `flight-bot`을 실제 Google Flights + Telegram까지 검증하는 전용 폴더입니다.
+
+## 중요한 호환성 원칙
+
+`03-notification-test-menu.cmd`는 Windows 기본 `powershell.exe`(Windows PowerShell 5.1)에서도 동작해야 합니다.
+
+그래서 실제 실행되는 `notification-test-menu.ps1`은 **ASCII-only**로 유지합니다. GitHub의 BOM 없는 UTF-8 `.ps1`에 한글 문자열을 직접 넣으면 Windows PowerShell 5.1이 ANSI로 잘못 읽어 문법 오류를 만들 수 있기 때문입니다.
+
+CI에서 아래를 모두 검사합니다.
+
+```text
+Windows PowerShell 5.1 parse
+PowerShell 7 parse
+notification menu ASCII-only
+.cmd -> canonical .ps1 파일명 일치
+legacy/v2 중복 메뉴 파일 없음
+```
 
 ## 1. 최초 설치 / 전체 테스트
 
@@ -20,133 +36,169 @@ Python 3.12 확인
 → 전체 pytest 실행
 ```
 
-이미 같은 폴더에서 `.venv-win`을 유지하고 있고 dependency 변경이 없다면 매번 실행할 필요는 없습니다.
-
-## 2. 실제 Google Flights 가격 수집 테스트
+## 2. Google Flights 가격 수집 acceptance
 
 ```text
 02-live-cjj-tpe-visible.cmd
 ```
 
-현재 acceptance 범위:
+현재 acceptance:
 
 ```text
 CJJ → TPE → CJJ
 2026-09-18 ~ 2026-09-20
 왕복 / 성인 1명 / Economy / KRW
-Cheapest 선택
-→ 필요한 refresh/recovery
+
+Cheapest 실제 선택
+→ 강제 full reload 1회
+→ Price unavailable이면 추가 recovery reload 최대 2회
+→ Cheapest 선택상태 재확인
 → 직항만 수집
-→ 중복 직항 제거
-→ 최저가 + 추가 직항 후보 표시
+→ 중복 제거
+→ 최저가 + 추가 직항 후보
 → Google Flights 검색결과 URL 1개
 → 종료
 ```
 
-Booking options, 항공사 결제 페이지, OTA/여행사 페이지에는 들어가지 않습니다.
+Booking/항공사 결제/OTA 페이지는 들어가지 않습니다.
 
-정상 출력의 핵심:
-
-```text
-=== DIRECT GOOGLE RESULTS ===
-direct_offer_1=...
-direct_offer_2=...
-
-=== SUMMARY ===
-connections_in_alert=0
-booking_navigation_performed=False
-external_checkout_navigation_performed=False
-google_flights_result_url=...
-acceptance=GOOGLE_RESULTS_DIRECT_ONLY_SINGLE_LINK
-```
-
-## 3. 실제 Telegram 알림 테스트 — 추천
+## 3. 실제 Telegram 알림 E2E 테스트
 
 ```text
 03-notification-test-menu.cmd
 ```
 
-처음 실행할 때 `.env`가 없으면 `.env.example`을 복사해 `.env`를 만들어 줍니다. 아래 3개를 입력한 뒤 다시 실행합니다.
+`.env`에 최소 아래 3개가 필요합니다.
 
 ```text
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_ALLOWED_CHAT_IDS=...
-ADMIN_SECRET=아무_긴_랜덤문자열
+ADMIN_SECRET=test123456789
 ```
 
-메뉴는 실행 중인 봇을 자동 탐지합니다. 없으면 선택할 수 있습니다.
+테스트 메뉴는 시작 전에 다음을 자동 검사합니다.
 
 ```text
-1. Windows 로컬 봇 시작
-2. Docker Compose 봇 시작
+.env 필수값
+Telegram bot token 연결
+Telegram chat ID 접근 가능 여부
+HTTP 포트 충돌
+기존 실행 중인 봇이 최신 runtime contract인지
+provider = google-playwright-results-observed-accepted-flow
+Cheapest forced reload = true
+Price unavailable recovery reloads = 2
+검색 저장공간 격리 = true
+검색 주기 = 2시간
+실제 슬롯 한도 = 10
+admin endpoint 활성화
 ```
 
-그 다음 메뉴:
+오래된 ZIP/오래된 Docker 컨테이너가 8080 포트를 잡고 있으면 **그 상태에 붙어서 잘못 테스트하지 않고 중단**합니다.
+
+### 실행 모드
+
+봇이 실행 중이 아니면:
 
 ```text
-1. Health / 슬롯 상태
-2. 슬롯 1개 목표가 알림 테스트
-3. 슬롯 1개 정기알림 테스트
-4. 전체 슬롯 일반 가격검색
-5. 전체 슬롯 강제 정기알림
-6. Telegram 테스트 명령 표시
+1. LOCAL Windows runtime
+   - 브라우저가 보임
+   - 테스트 전용 DB: artifacts/notification-test.db
+
+2. DOCKER runtime
+   - headless
+   - DB: /data/flight_bot.db
+   - debug: /debug
 ```
 
-### 가장 쉬운 목표가 알림 테스트
+Docker Compose는 컨테이너 안에서 아래 값을 강제로 고정합니다.
 
-Telegram에서 먼저:
+```text
+DATABASE_PATH=/data/flight_bot.db
+BROWSER_HEADLESS=true
+BROWSER_DEBUG_DIR=/debug
+```
+
+따라서 Windows 테스트용 `.env` 값을 그대로 들고 Docker로 가도 host 경로나 headed-browser 설정이 컨테이너를 깨뜨리지 않습니다.
+
+## 가장 쉬운 목표가 알림 테스트
+
+LOCAL 모드로 봇을 띄운 뒤 Telegram에서:
 
 ```text
 /flight add CJJ TPE 2026-09-18 2026-09-20 999999
 ```
 
-목표가를 현재 항공권보다 충분히 높게 잡아 첫 테스트에서 조건을 만족시키기 위한 예입니다.
-
-그 뒤 `03` 메뉴에서:
+그 다음 메뉴:
 
 ```text
-2 → 슬롯 1
+2. Test TARGET alert for one slot
+Slot number: 1
 ```
 
-정상이면 Telegram에:
+브라우저에서 정상적으로 보여야 하는 순서:
 
 ```text
-🔥 목표가 도달
-✈️ CJJ → TPE 왕복
-...
-Google Flights 직항 왕복가
-1. ...
-2. ...
-Google Flights 검색결과: https://www.google.com/travel/flights/search?...
+Google Flights
+→ Cheapest 선택
+→ full reload
+→ 필요시 Price unavailable recovery reload
+→ Cheapest 재확인
+→ 직항 결과 수집
+→ 브라우저 종료
 ```
 
-이 옵니다.
+그리고 Telegram에는 목표가 도달 알림이 1회 와야 합니다.
 
-같은 메뉴 `2 → 슬롯 1`을 다시 실행해도 같은 목표가 설정에서는 `🔥 목표가 도달` 알림이 다시 오지 않아야 정상입니다.
-
-목표가를 다시 설정하면 1회 재활성화됩니다.
+같은 목표가 설정에서는 두 번째 검색부터 목표가 알림이 반복되지 않습니다. 다시 테스트하려면 Telegram에서 목표가를 바꿔 재무장합니다.
 
 ```text
 /flight target 1 999998
 ```
 
-### 정기알림 즉시 테스트
+## 정기알림 즉시 테스트
 
-실제 오전 08:00까지 기다릴 필요가 없습니다.
-
-```text
-03 메뉴
-→ 3
-→ 슬롯 번호
-```
-
-정상이면:
+실제 오전 08:00까지 기다릴 필요 없습니다.
 
 ```text
-📊 정기 가격 알림
+3. Test DAILY summary for one slot
+Slot number: 1
 ```
 
-이 즉시 옵니다. 이 테스트는 목표가 one-shot 상태를 소모하거나 재무장하지 않습니다.
+이 테스트는 목표가 one-shot 상태를 소모하거나 재무장하지 않습니다.
+
+## 로그
+
+메뉴의:
+
+```text
+4. Show runtime search logs
+```
+
+또는 목표가/정기알림 테스트 직후 자동 출력되는 로그에서 아래 순서를 확인합니다.
+
+```text
+runtime_stage=cheapest-warmup
+runtime_cheapest_clicked=True 또는 이미 selected
+runtime_cheapest_selected_full_reload=1
+runtime_price_recovery_reload=...   # 필요할 때만
+runtime_price_surface=ready
+runtime_stage=cheapest-post-reload
+runtime_direct_offer_count=...
+runtime_lowest_direct_round_trip=...
+```
+
+LOCAL 로그:
+
+```text
+artifacts/runtime-alert-test/bot.stdout.log
+artifacts/runtime-alert-test/bot.stderr.log
+```
+
+Docker 로그:
+
+```powershell
+docker compose logs --tail 200 flight-bot
+```
 
 ## 운영 기본값
 
@@ -160,39 +212,15 @@ Google Flights 검색결과: https://www.google.com/travel/flights/search?...
 사용자 링크: Google Flights 검색결과 1개만
 ```
 
-각 가격 검색은 새 BrowserContext를 사용하여 cookies/cache/localStorage/IndexedDB 등 이전 검색 저장공간을 다음 2시간 관측에 넘기지 않습니다.
-
-## Docker 테스트
-
-`.env`를 채운 뒤:
-
-```text
-03-notification-test-menu.cmd
-→ Docker Compose 시작 선택
-```
-
-또는 직접:
-
-```powershell
-docker compose up -d --build
-```
-
-기본 HTTP 포트는 host loopback에만 노출됩니다.
-
-```text
-http://127.0.0.1:8080
-```
-
-중지:
-
-```powershell
-docker compose down
-```
+각 가격 검색은 새 BrowserContext를 사용하여 cookies/cache/localStorage/IndexedDB 등 이전 검색 저장공간을 다음 관측에 넘기지 않습니다.
 
 ## 파일
 
 ```text
 01-setup-and-unit-test.cmd      설치 + 전체 단위테스트
-02-live-cjj-tpe-visible.cmd     Google Flights 실가격 acceptance
-03-notification-test-menu.cmd   로컬/Docker Telegram 알림 E2E 테스트 메뉴
+02-live-cjj-tpe-visible.cmd     Google Flights visible acceptance
+03-notification-test-menu.cmd   실제 Telegram 알림 E2E 테스트
+notification-test-menu.ps1      03의 canonical PowerShell 스크립트 (ASCII-only)
 ```
+
+`notification-test-menu-v2.ps1` 같은 병렬/legacy 메뉴는 두지 않습니다. 테스트 진입점은 하나만 유지합니다.
