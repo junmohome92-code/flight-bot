@@ -13,9 +13,11 @@ from playwright.async_api import BrowserContext, Page, async_playwright
 try:  # direct Windows execution from scripts/
     import google_booking_pointer_probe as base
     import google_cheapest_capture as cheapest
+    import google_departure_transition as transition
 except ImportError:  # pytest/import from repository root
     from scripts import google_booking_pointer_probe as base
     from scripts import google_cheapest_capture as cheapest
+    from scripts import google_departure_transition as transition
 
 
 _PRICE_UNAVAILABLE_RE = re.compile(
@@ -273,7 +275,10 @@ def print_candidate(prefix: str, candidate: dict, state: dict, policy: str) -> N
     if prefix == "departure":
         print(f"departure_cheapest_tab_selected={state.get('cheapestSelected')}")
         print(f"departure_cheapest_loading={state.get('cheapestLoading')}")
-        print(f"departure_advertised={state.get('advertisedPrice') if state.get('advertisedPrice') is not None else 'unknown'}")
+        print(
+            f"departure_advertised="
+            f"{state.get('advertisedPrice') if state.get('advertisedPrice') is not None else 'unknown'}"
+        )
     print(f"{prefix}_candidate_count={len(cheapest.phase_candidates(state, str(candidate.get('phase'))))}")
     print(f"{prefix}_candidate_prices={','.join(f'{value:,}' for value in prices[:24])}")
     print(f"{prefix}_anchor_mode={candidate.get('anchorMode')}")
@@ -290,6 +295,7 @@ async def _run_session(playwright, *, session_attempt: int) -> None:
     return_capture_ms = max(300, int(os.getenv("GOOGLE_UI_RETURN_CAPTURE_MS", "900")))
     ready_wait_ms = max(2500, int(os.getenv("GOOGLE_UI_PRICE_READY_WAIT_MS", "8000")))
     recovery_reloads = max(0, int(os.getenv("GOOGLE_UI_PRICE_RELOADS", "2")))
+    returning_reloads = max(0, int(os.getenv("GOOGLE_UI_RETURNING_RELOADS", "2")))
     keep_open_seconds = int(os.getenv("BROWSER_KEEP_OPEN_SECONDS", "8"))
     artifact_dir = Path(os.getenv("BROWSER_DEBUG_DIR", "artifacts/google-ui-win"))
     profile_dir = Path(os.getenv("BROWSER_PROFILE_DIR", "artifacts/google-profile-win"))
@@ -368,19 +374,34 @@ async def _run_session(playwright, *, session_attempt: int) -> None:
             print(f"departure_advertised={advertised if advertised is not None else 'unknown'}")
             print(f"departure_candidate_prices={prices}")
             await base.save_debug(page, artifact_dir, "departure-capture-failed")
-            raise RuntimeError("Cheapest was selected and refreshed, but its settled trustworthy lowest row was not captured")
+            raise RuntimeError(
+                "Cheapest was selected and refreshed, but its settled trustworthy lowest row was not captured"
+            )
         print_candidate("departure", departure, dep_state, dep_policy)
 
+        # The click target must be a specific flight-card-level element. Keep the
+        # pre-click URL so a post-click Google load error can be classified as
+        # either a bad click (URL unchanged) or a transient Returning failure
+        # after Google accepted the outbound selection (URL changed).
         await base.set_phase(page, "returning")
-        mode = await base.click_captured_candidate(page, departure)
+        departure_before_url = page.url
+        mode = await transition.click_specific_candidate(page, departure, prefix="departure")
         print(f"departure_pointer_click_mode={mode}")
         print("departure_pointer_click_sent=True")
-        returning_page = await base.wait_for_returning_page(page, selection_wait_ms)
+        returning_page, returning_reload_count = await transition.wait_for_returning_with_recovery(
+            page,
+            before_url=departure_before_url,
+            timeout_ms=selection_wait_ms,
+            max_reloads=returning_reloads,
+            artifact_dir=artifact_dir,
+            save_debug=base.save_debug,
+        )
         print(f"departure_navigation_confirmed={returning_page}")
+        print(f"departure_transition_recovery_reload_count={returning_reload_count}")
         print(f"current_url_after_departure={page.url}")
         if not returning_page:
             await base.save_debug(page, artifact_dir, "departure-navigation-failed")
-            raise RuntimeError("Departure click did not reach Returning flights")
+            raise RuntimeError("Departure selection did not reach a trustworthy Returning flights surface")
 
         returning, ret_state, ret_policy = await cheapest.wait_for_candidate(
             page,
@@ -403,7 +424,10 @@ async def _run_session(playwright, *, session_attempt: int) -> None:
                 min_price=base.MIN_RETURN_ADJUSTMENT,
             )
             print(f"body_has_returning={'returning flights' in body.lower() or '귀국 항공편' in body}")
-            print(f"return_candidate_prices={sorted({int(i['price']) for i in eligible if i.get('price') is not None})}")
+            print(
+                f"return_candidate_prices="
+                f"{sorted({int(i['price']) for i in eligible if i.get('price') is not None})}"
+            )
             await base.save_debug(page, artifact_dir, "return-capture-failed")
             raise RuntimeError("Returning flights loaded, but no trustworthy return price row was captured")
         if not base.flight_card_is_specific(
@@ -417,7 +441,7 @@ async def _run_session(playwright, *, session_attempt: int) -> None:
         print_candidate("return", returning, ret_state, ret_policy)
 
         await base.set_phase(page, "done")
-        mode = await base.click_captured_candidate(page, returning)
+        mode = await transition.click_specific_candidate(page, returning, prefix="return")
         print(f"return_pointer_click_mode={mode}")
         print("return_pointer_click_sent=True")
         await page.wait_for_timeout(700)
@@ -458,7 +482,10 @@ async def _run_session(playwright, *, session_attempt: int) -> None:
     except Exception:
         if page is not None and not page.is_closed():
             try:
-                await base.save_json(artifact_dir / "snapshot-error-state.json", await cheapest.capture_state(page))
+                await base.save_json(
+                    artifact_dir / "snapshot-error-state.json",
+                    await cheapest.capture_state(page),
+                )
                 await base.save_debug(page, artifact_dir, "snapshot-probe-error")
             except Exception:
                 pass
@@ -494,6 +521,9 @@ async def main() -> None:
     print("  Cheapest selected before forced full refresh: YES")
     print("  forced full refresh after Cheapest: YES")
     print("  extra Price unavailable recovery reloads: YES")
+    print("  specific card-level flight click target: YES")
+    print("  inner price/detail pointer action accepted as flight click: NO")
+    print("  outbound-selected Returning load-error recovery: YES")
     print("  TargetClosed full browser-session restart: YES")
     print("  same Edge profile retained across retries: YES")
     print("  actual pointer-event boundary: YES")
@@ -511,10 +541,19 @@ async def main() -> None:
                 return
             except Exception as exc:
                 last_exc = exc
-                recoverable = is_target_closed_error(exc) or isinstance(exc, RecoverablePriceUnavailable)
+                recoverable = (
+                    is_target_closed_error(exc)
+                    or isinstance(exc, RecoverablePriceUnavailable)
+                    or isinstance(exc, transition.RecoverableReturningLoadError)
+                )
                 print(f"\nSESSION FAILED: {type(exc).__name__}: {exc}")
                 if recoverable and attempt <= browser_restarts:
-                    reason = "target-closed" if is_target_closed_error(exc) else "price-unavailable"
+                    if is_target_closed_error(exc):
+                        reason = "target-closed"
+                    elif isinstance(exc, transition.RecoverableReturningLoadError):
+                        reason = "returning-load-error"
+                    else:
+                        reason = "price-unavailable"
                     print(f"browser_session_restart={attempt}/{browser_restarts} reason={reason}")
                     await asyncio.sleep(0.75)
                     continue
