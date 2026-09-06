@@ -4,7 +4,7 @@ on:
   push:
     branches: ["poc/naver-telegram-e2e"]
     paths:
-      - "scripts/naver_api_live_probe.py"
+      - "scripts/naver_flight_probe.py"
       - ".github/workflows/naver-api-live.yml"
   workflow_dispatch:
 
@@ -20,5 +20,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Probe Naver Flights SSE API for CJJ-TPE round trip
-        run: python scripts/naver_api_live_probe.py
+      - name: Run production Naver SSE POC for CJJ-TPE round trip
+        run: python scripts/naver_flight_probe.py
