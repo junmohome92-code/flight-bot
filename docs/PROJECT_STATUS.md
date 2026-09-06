@@ -2,6 +2,48 @@
 
 최종 정리일: 2026-09-06
 
+## 0. 최신 체크포인트
+
+현재 hardened code baseline:
+
+```text
+6cba0260f48e2f7537b26336c9bf10a3eb90b052
+fix: preserve spacing across inline Google flight nodes
+```
+
+이 baseline의 GitHub Actions run:
+
+```text
+run 146 / id 34023484207
+conclusion=success
+```
+
+성공 job:
+
+```text
+unit-linux      = success
+unit-windows    = success
+docker-smoke    = success
+browser-contract= success
+```
+
+`browser-contract`는 단순 unit helper가 아니라 실제 Chromium을 띄워 아래 lifecycle을 재현합니다.
+
+```text
+Cheapest tab text-node price mutation
+418,500 → 311,811
+→ transient departure row capture
+→ sessionStorage phase handoff
+→ full document navigation
+→ 새 document에서 returning observer 자동 복원
+→ Returning flights marker
+→ +₩0 return row capture
+```
+
+첫 browser-contract run에서는 inline `<span>` 사이 텍스트가 공백 없이 합쳐져 시간 parser가 row를 놓치는 문제가 실제로 검출됐고, `6cba026...`에서 descendant text-node를 semantic spacing으로 합치도록 수정한 뒤 최종 통과했습니다.
+
+**다음 단계는 사용자 Windows 실사이트 결과 확인입니다. 이 결과 전에는 runtime Provider migration을 완료 처리하지 않습니다.**
+
 ## 1. 현재 단계
 
 **Google Flights Provider Migration — transient observed capability confirmed / navigation-safe Cheapest→Returning→Booking gate pending user Windows rerun**
@@ -136,9 +178,12 @@ Cheapest from ₩311,811
 2. Cheapest click 뒤 capture를 arm해 transition price를 놓칠 수 있음
 3. disappearing source/anchor의 `isConnected`를 후보 확정 때 다시 요구
 4. MutationObserver의 `characterData` Text-node target을 Element가 아니라는 이유로 직접 처리하지 않음
-5. 출국 선택 full navigation 후 새 document init state가 `captureEnabled=false`로 reset
+5. 출국 선택 full navigation 후 새 document init state가 capture 비활성 상태로 reset
 6. 과거 좌표가 layout shift 후 다른 row를 가리켜도 재검증 없이 pointer click 가능
 7. 단순 fixed window만으로 loading 중 비싼 임시 row를 너무 빨리 선택 가능
+8. inline descendant text가 공백 없이 합쳐질 경우 시간/route shape가 깨질 수 있음
+
+현재 hardened flow는 위 항목을 모두 방어합니다.
 
 ## 8. 현재 Google UI 구조
 
@@ -160,6 +205,12 @@ DOM init/capture:
 scripts/google_dom_capture.js
 ```
 
+브라우저 lifecycle 회귀 테스트:
+
+```text
+tests/test_google_browser_contract.py
+```
+
 구형:
 
 ```text
@@ -178,6 +229,7 @@ normal search URL
 → actual Cheapest/최저가 click
 → selected 확인
 → added node + aria + characterData snapshot
+→ descendant text-node semantic spacing 보존
 → advertised Cheapest low-water 안정
 → actual eligible row minimum 안정
 → loading 중이면 최소 2 concrete row 요구
@@ -213,7 +265,7 @@ external_checkout_verified=False
 verified=False
 ```
 
-이 **새 hardened probe는 아직 사용자 Windows에서 재실행 전**입니다. CI green은 Google 실가격 acceptance를 의미하지 않습니다.
+이 **새 hardened probe는 아직 사용자 Windows에서 재실행 결과 확인 전**입니다. GitHub CI green은 Google 실가격 acceptance를 의미하지 않습니다.
 
 ## 10. Runtime browser
 
@@ -323,18 +375,40 @@ docker-smoke:
   run container
   GET /health
   non-root user 확인
+
+browser-contract:
+  real Chromium
+  transient text mutation
+  full document navigation
+  returning phase restoration
+  +₩0 row capture
 ```
+
+최종 code baseline `6cba026...`에서 위 4개 job 모두 success입니다.
 
 GitHub hosted Windows는 과거 실제 Google flight-row price DOM이 내려오지 않았으므로 live 실가격 acceptance 환경으로 사용하지 않습니다.
 
 ## 15. 다음 액션
 
-1. 최종 HEAD의 Linux / Windows / Docker CI green 확인
-2. 최신 ZIP에서 Windows `02-live-cjj-tpe-visible.cmd` 실행
-3. 출력에서 실제 수동 Cheapest와 departure 값을 비교
-4. Returning/Booking까지 성공하면 external seller checkout gate 구현
-5. 그 이후 accepted runtime Provider migration
-6. Ubuntu production browser acceptance
+최신 ZIP이 이번 hardening/`constraints.txt` 도입 전 환경에서 넘어오는 것이므로 **이번 한 번은** Windows에서:
+
+```text
+01-setup-and-unit-test.cmd
+02-live-cjj-tpe-visible.cmd
+```
+
+순서로 실행합니다.
+
+그 다음부터 dependency 변경이 없고 `.venv-win`이 유지되면 `02`만 실행하면 됩니다.
+
+결과 분기:
+
+1. 수동 Cheapest와 `departure_advertised` / `departure_selected` 일치 여부 확인
+2. Returning/Booking까지 성공하면 external seller checkout final-total gate 구현
+3. external checkout verified gate 성공 후 accepted runtime Provider migration
+4. 마지막으로 Ubuntu production browser acceptance
+
+**사용자 Windows 결과가 오기 전에는 같은 URL-refresh/stealth 실험으로 회귀하지 말고 현재 hardened lifecycle을 기준으로 유지합니다.**
 
 ## 16. 금지
 
@@ -345,3 +419,4 @@ GitHub hosted Windows는 과거 실제 Google flight-row price DOM이 내려오�
 - advertised Cheapest보다 비싼 row를 fallback 선택
 - stale pointer coordinate 무검증 click
 - legacy Provider alert 허용
+- 사용자 Windows live 결과 전 runtime accepted migration 완료 선언
