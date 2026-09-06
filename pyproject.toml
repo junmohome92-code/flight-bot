@@ -1,12 +1,11 @@
 [project]
 name = "flight-bot"
-version = "0.2.0"
+version = "0.3.0"
 description = "Self-hosted Google Flights price monitor using Playwright/Chromium"
 requires-python = ">=3.12"
 dependencies = [
   "apscheduler>=3.10,<4",
   "discord.py>=2.5,<3",
-  "fast-flights>=3.0,<4",
   "fastapi>=0.116,<1",
   "playwright>=1.55,<2",
   "pydantic-settings>=2.10,<3",
