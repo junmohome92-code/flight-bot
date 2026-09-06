@@ -37,7 +37,7 @@ Skyscanner:
 03-SKYSCANNER-flight-test.bat
 ```
 
-`.venv-win`이 없으면 BAT가 최초 준비를 자동 실행합니다.
+`.venv-provider-poc`이 없으면 BAT가 POC 전용 환경을 자동 생성합니다. 기존 운영 테스트용 환경과 섞지 않습니다.
 
 즉 처음부터 `01`을 따로 실행할 필요는 없습니다.
 
