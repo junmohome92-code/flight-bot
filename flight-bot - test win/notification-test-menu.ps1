@@ -5,9 +5,48 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $RepoRoot
 
 $ExpectedProvider = 'google-playwright-results-observed-accepted-flow'
+$ExpectedQueryContract = 'accepted-tfs-v1'
 $ExpectedSlots = 10
 $ExpectedSearchHours = 2
+$ExpectedConcurrency = 2
 $ExpectedRecoveryReloads = 2
+
+Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue
+
+function Invoke-Utf8JsonRequest {
+    param(
+        [string]$Method,
+        [string]$Uri,
+        [hashtable]$Headers = @{},
+        [int]$TimeoutSec = 30
+    )
+    $handler = New-Object System.Net.Http.HttpClientHandler
+    $client = New-Object System.Net.Http.HttpClient($handler)
+    $client.Timeout = [TimeSpan]::FromSeconds($TimeoutSec)
+    $request = $null
+    $response = $null
+    try {
+        $httpMethod = New-Object System.Net.Http.HttpMethod($Method)
+        $request = New-Object System.Net.Http.HttpRequestMessage($httpMethod, $Uri)
+        foreach ($key in $Headers.Keys) {
+            $request.Headers.TryAddWithoutValidation([string]$key, [string]$Headers[$key]) | Out-Null
+        }
+        $response = $client.SendAsync($request).Result
+        $bytes = $response.Content.ReadAsByteArrayAsync().Result
+        $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+        if (-not $response.IsSuccessStatusCode) {
+            throw ("HTTP " + [int]$response.StatusCode + " from " + $Uri + ": " + $text)
+        }
+        if (-not $text) { return $null }
+        return ($text | ConvertFrom-Json)
+    }
+    finally {
+        if ($response) { $response.Dispose() }
+        if ($request) { $request.Dispose() }
+        $client.Dispose()
+        $handler.Dispose()
+    }
+}
 
 function Read-DotEnv {
     param([string]$Path)
@@ -33,7 +72,7 @@ function Read-DotEnv {
 function Get-Health {
     param([string]$BaseUrl)
     try {
-        return Invoke-RestMethod -Method Get -Uri "$BaseUrl/health" -TimeoutSec 4
+        return Invoke-Utf8JsonRequest -Method 'GET' -Uri "$BaseUrl/health" -TimeoutSec 4
     }
     catch {
         return $null
@@ -85,11 +124,17 @@ function Assert-RuntimeContract {
         if ($Health.provider -ne $ExpectedProvider) {
             $errors += "Provider mismatch. Expected '$ExpectedProvider', got '$($Health.provider)'."
         }
+        if ($Health.google_query_contract -ne $ExpectedQueryContract) {
+            $errors += "Query contract mismatch. Expected '$ExpectedQueryContract', got '$($Health.google_query_contract)'."
+        }
         if (-not [bool]$Health.provider_accepted_for_alerts) {
             $errors += 'Runtime provider is not accepted for alerts.'
         }
         if (-not [bool]$Health.browser_search_storage_isolated) {
             $errors += 'Browser search storage isolation is disabled.'
+        }
+        if ([bool]$Health.browser_block_assets) {
+            $errors += 'Browser asset blocking must be disabled for the accepted production surface.'
         }
         if (-not [bool]$Health.cheapest_selected_full_reload) {
             $errors += 'Cheapest forced full reload contract is disabled.'
@@ -105,6 +150,12 @@ function Assert-RuntimeContract {
         }
         if ([int]$Health.search_interval_hours -ne $ExpectedSearchHours) {
             $errors += "Search interval must be $ExpectedSearchHours hours."
+        }
+        if ([int]$Health.search_concurrency -ne $ExpectedConcurrency) {
+            $errors += "Search concurrency must be $ExpectedConcurrency."
+        }
+        if ([int]$Health.active_searches -gt $ExpectedConcurrency) {
+            $errors += 'Active searches exceeded the concurrency contract.'
         }
         if (-not [bool]$Health.admin_endpoint_enabled) {
             $errors += 'Admin test endpoint is disabled.'
@@ -127,8 +178,8 @@ function Assert-RuntimeContract {
 function Assert-AdminAuth {
     param([string]$BaseUrl, [string]$Secret)
     try {
-        $probe = Invoke-RestMethod `
-            -Method Post `
+        $probe = Invoke-Utf8JsonRequest `
+            -Method 'POST' `
             -Uri "$BaseUrl/admin/check-slot/999999" `
             -Headers @{ 'X-Flight-Bot-Secret' = $Secret } `
             -TimeoutSec 10
@@ -171,7 +222,7 @@ function Test-TelegramConfiguration {
     param([string]$Token, [string]$ChatIds)
     Write-Host '[preflight] Checking Telegram bot token ...'
     try {
-        $me = Invoke-RestMethod -Method Get -Uri ("https://api.telegram.org/bot" + $Token + '/getMe') -TimeoutSec 10
+        $me = Invoke-Utf8JsonRequest -Method 'GET' -Uri ("https://api.telegram.org/bot" + $Token + '/getMe') -TimeoutSec 10
         if (-not $me.ok) { throw 'Telegram getMe returned ok=false.' }
         Write-Host ("[preflight] Telegram bot OK: @" + $me.result.username) -ForegroundColor Green
     }
@@ -185,7 +236,7 @@ function Test-TelegramConfiguration {
         $id = $chatId.Trim()
         if (-not $id) { continue }
         try {
-            $chat = Invoke-RestMethod -Method Get -Uri ("https://api.telegram.org/bot" + $Token + '/getChat?chat_id=' + $id) -TimeoutSec 10
+            $chat = Invoke-Utf8JsonRequest -Method 'GET' -Uri ("https://api.telegram.org/bot" + $Token + '/getChat?chat_id=' + $id) -TimeoutSec 10
             if ($chat.ok) {
                 Write-Host ("[preflight] Telegram chat reachable: " + $id) -ForegroundColor Green
             }
@@ -220,8 +271,8 @@ function Invoke-AdminPost {
     param([string]$BaseUrl, [string]$Secret, [string]$Path, [int]$TimeoutSec = 320)
     Write-Host ''
     Write-Host "POST $Path" -ForegroundColor Cyan
-    $response = Invoke-RestMethod `
-        -Method Post `
+    $response = Invoke-Utf8JsonRequest `
+        -Method 'POST' `
         -Uri "$BaseUrl$Path" `
         -Headers @{ 'X-Flight-Bot-Secret' = $Secret } `
         -TimeoutSec $TimeoutSec
@@ -320,14 +371,20 @@ else {
 
         $oldDb = $env:DATABASE_PATH
         $oldHeadless = $env:BROWSER_HEADLESS
+        $oldBlockAssets = $env:BROWSER_BLOCK_ASSETS
         $oldDebug = $env:BROWSER_DEBUG_DIR
+        $oldConcurrency = $env:SEARCH_CONCURRENCY
+        $oldStagger = $env:SEARCH_STAGGER_SECONDS
         $oldUnbuffered = $env:PYTHONUNBUFFERED
         $oldUtf8 = $env:PYTHONUTF8
         $oldIoEncoding = $env:PYTHONIOENCODING
         try {
             $env:DATABASE_PATH = Join-Path $Artifacts 'notification-test.db'
             $env:BROWSER_HEADLESS = 'false'
+            $env:BROWSER_BLOCK_ASSETS = 'false'
             $env:BROWSER_DEBUG_DIR = $RuntimeDebug
+            $env:SEARCH_CONCURRENCY = '2'
+            $env:SEARCH_STAGGER_SECONDS = '5'
             $env:PYTHONUNBUFFERED = '1'
             $env:PYTHONUTF8 = '1'
             $env:PYTHONIOENCODING = 'utf-8'
@@ -342,7 +399,10 @@ else {
         finally {
             if ($null -eq $oldDb) { Remove-Item Env:DATABASE_PATH -ErrorAction SilentlyContinue } else { $env:DATABASE_PATH = $oldDb }
             if ($null -eq $oldHeadless) { Remove-Item Env:BROWSER_HEADLESS -ErrorAction SilentlyContinue } else { $env:BROWSER_HEADLESS = $oldHeadless }
+            if ($null -eq $oldBlockAssets) { Remove-Item Env:BROWSER_BLOCK_ASSETS -ErrorAction SilentlyContinue } else { $env:BROWSER_BLOCK_ASSETS = $oldBlockAssets }
             if ($null -eq $oldDebug) { Remove-Item Env:BROWSER_DEBUG_DIR -ErrorAction SilentlyContinue } else { $env:BROWSER_DEBUG_DIR = $oldDebug }
+            if ($null -eq $oldConcurrency) { Remove-Item Env:SEARCH_CONCURRENCY -ErrorAction SilentlyContinue } else { $env:SEARCH_CONCURRENCY = $oldConcurrency }
+            if ($null -eq $oldStagger) { Remove-Item Env:SEARCH_STAGGER_SECONDS -ErrorAction SilentlyContinue } else { $env:SEARCH_STAGGER_SECONDS = $oldStagger }
             if ($null -eq $oldUnbuffered) { Remove-Item Env:PYTHONUNBUFFERED -ErrorAction SilentlyContinue } else { $env:PYTHONUNBUFFERED = $oldUnbuffered }
             if ($null -eq $oldUtf8) { Remove-Item Env:PYTHONUTF8 -ErrorAction SilentlyContinue } else { $env:PYTHONUTF8 = $oldUtf8 }
             if ($null -eq $oldIoEncoding) { Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue } else { $env:PYTHONIOENCODING = $oldIoEncoding }
@@ -364,7 +424,7 @@ else {
         exit 0
     }
 
-    $health = Wait-Health -BaseUrl $BaseUrl -Seconds 75
+    $health = Wait-Health -BaseUrl $BaseUrl -Seconds 90
     if (-not $health) {
         Show-RuntimeLog -DockerMode $DockerMode -StdoutPath $StdoutPath -StderrPath $StderrPath
         throw "Bot health check failed at $BaseUrl"
@@ -386,8 +446,11 @@ Write-Host ' Runtime ready'
 Write-Host '=================================================='
 Write-Host "HTTP: $BaseUrl"
 Write-Host "Provider: $($health.provider)"
+Write-Host "Query contract: $($health.google_query_contract)"
 Write-Host "Slots: $($health.slots_used)/$($health.slots_max)"
 Write-Host "Search interval: $($health.search_interval_hours) hours"
+Write-Host "Search concurrency: $($health.search_concurrency)"
+Write-Host "Search stagger: $($health.search_stagger_seconds) seconds"
 Write-Host "Daily summary hour: $($health.daily_summary_hour):00"
 Write-Host "Browser headless: $($health.browser_headless)"
 Write-Host "Storage isolated: $($health.browser_search_storage_isolated)"
@@ -437,12 +500,8 @@ Write-Host 'Then use menu option 2 with slot 1.'
             '4' {
                 Show-RuntimeLog -DockerMode $DockerMode -StdoutPath $StdoutPath -StderrPath $StderrPath
             }
-            '0' {
-                break MenuLoop
-            }
-            default {
-                Write-Host 'Unknown selection.' -ForegroundColor Yellow
-            }
+            '0' { break MenuLoop }
+            default { Write-Host 'Unknown selection.' -ForegroundColor Yellow }
         }
     }
     catch {
