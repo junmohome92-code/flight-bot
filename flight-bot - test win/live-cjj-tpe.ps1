@@ -29,7 +29,9 @@ $env:GOOGLE_UI_DEPARTURE_CAPTURE_MS = '3500'
 $env:GOOGLE_UI_PRICE_READY_WAIT_MS = '8000'
 $env:GOOGLE_UI_PRICE_RELOADS = '2'
 $env:ALERT_NONSTOP_ONLY = 'true'
-$env:ALERT_MAX_OFFERS = '4'
+if (-not $env:ALERT_MAX_OFFERS) {
+    $env:ALERT_MAX_OFFERS = '4'
+}
 
 $env:GOOGLE_UI_SEARCH_URL = 'https://www.google.com/travel/flights/search?tfs=CBwQAhoeEgoyMDI2LTA5LTE4agcIARIDQ0pKcgcIARIDVFBFGh4SCjIwMjYtMDktMjBqBwgBEgNUUEVyBwgBEgNDSkpAAUgBcAGCAQsI____________AZgBAQ&hl=en&gl=kr&curr=KRW'
 
