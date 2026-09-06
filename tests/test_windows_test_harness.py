@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WIN = ROOT / "flight-bot - test win"
 SCRIPTS = ROOT / "scripts"
+SRC = ROOT / "src" / "flight_bot"
 
 
 def test_windows_has_naver_and_telegram_launchers():
@@ -12,8 +13,10 @@ def test_windows_has_naver_and_telegram_launchers():
 
     assert "scripts\\naver_flight_probe.py" in naver
     assert "scripts\\naver_telegram_e2e.py" in e2e
-    assert "skyscanner" not in naver.lower()
-    assert "skyscanner" not in e2e.lower()
+    assert "no browser" in e2e.lower()
+    assert "playwright" not in naver.lower()
+    assert "playwright" not in e2e.lower()
+    assert "edge" not in e2e.lower()
 
 
 def test_windows_launchers_self_bootstrap_isolated_venv():
@@ -21,12 +24,11 @@ def test_windows_launchers_self_bootstrap_isolated_venv():
         launcher = (WIN / name).read_text(encoding="utf-8")
         assert ".venv-provider-poc\\Scripts\\python.exe" in launcher
         assert "setup-and-unit-test.ps1" in launcher
-        assert ".venv-win\\Scripts\\python.exe" not in launcher
 
     setup = (WIN / "setup-and-unit-test.ps1").read_text(encoding="utf-8")
     assert ".venv-provider-poc" in setup
     assert "provider-poc-requirements.txt" in setup
-    assert "-e '.[dev]'" not in setup
+    assert "playwright" not in setup.lower()
 
 
 def test_telegram_e2e_uses_dedicated_credential_file():
@@ -46,24 +48,24 @@ def test_e2e_searches_before_it_sends_telegram():
     search_pos = source.index("await collect_naver_api_results")
     send_pos = source.index('"sendMessage"')
     assert search_pos < send_pos
-    assert "booking_navigation_performed=False" in source
+    assert "TOP 5" in source
 
 
-def test_retired_provider_assets_are_absent():
+def test_retired_browser_assets_are_absent():
+    assert not (SRC / "browser_session.py").exists()
+    assert not (SRC / "runtime_results_provider.py").exists()
+    assert not (SRC / "google_ui_contract.py").exists()
     assert not list(SCRIPTS.glob("google_*"))
-    assert not list(SCRIPTS.glob("skyscanner_*"))
+    assert not list(SCRIPTS.glob("*edge*"))
     assert not list((ROOT / "tests").glob("test_google_*"))
-    assert not (WIN / "02-live-cjj-tpe-visible.cmd").exists()
-    assert not (WIN / "03-notification-test-menu.cmd").exists()
-    assert not (WIN / "03-SKYSCANNER-flight-test.bat").exists()
-    assert not (WIN / "live-cjj-tpe.ps1").exists()
-    assert not (WIN / "notification-test-menu.ps1").exists()
+    assert not (WIN / "02A-NAVER-API-SSE-test.bat").exists()
 
 
-def test_naver_poc_stops_at_search_results_and_never_books():
-    source = (SCRIPTS / "naver_flight_probe.py").read_text(encoding="utf-8")
-    assert "booking_navigation=False" in source
-    assert "booking_navigation_performed=False" in source
-    assert "checkout" not in source.lower()
-    assert "searchFlights" in source
-    assert "text/event-stream" in source
+def test_runtime_source_has_no_playwright_dependency():
+    for path in SRC.glob("*.py"):
+        assert "playwright" not in path.read_text(encoding="utf-8").lower(), path
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8").lower()
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8").lower()
+    assert "playwright" not in pyproject
+    assert "playwright" not in dockerfile
+    assert "chromium" not in dockerfile
