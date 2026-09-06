@@ -37,6 +37,21 @@ jobs:
           python -m playwright install chromium
           python -c "import asyncio; from playwright.async_api import async_playwright; exec('async def t():\n    p=await async_playwright().start()\n    b=await p.chromium.launch(headless=True)\n    print(b.version)\n    await b.close()\n    await p.stop()\nasyncio.run(t())')"
 
+  browser-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -c constraints.txt -e '.[dev]'
+      - name: Install Chromium for synthetic lifecycle test
+        run: python -m playwright install --with-deps chromium
+      - name: Verify transient text mutation and Returning full navigation
+        env:
+          RUN_BROWSER_CONTRACT_TESTS: "1"
+        run: pytest -q tests/test_google_browser_contract.py
+
   docker-smoke:
     runs-on: ubuntu-latest
     steps:
