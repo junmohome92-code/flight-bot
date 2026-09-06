@@ -6,6 +6,7 @@ from typing import Iterable, Mapping, Sequence
 
 MIN_KRW_PRICE = 50_000
 MAX_KRW_PRICE = 1_500_000
+MIN_RETURN_ADJUSTMENT = 0
 
 _KRW_SYMBOL_RE = re.compile(r"₩\s*([0-9][0-9,]*)")
 _KRW_WORD_RE = re.compile(r"([0-9][0-9,]*)\s+(?:South Korean won|Korean won|KRW)", re.I)
@@ -33,13 +34,23 @@ class UiFlightCandidate:
     candidate_id: str | None = None
 
 
-def parse_krw_prices(text: str | None) -> list[int]:
-    """Return plausible KRW amounts from visible text or accessibility labels."""
+def parse_krw_prices(
+    text: str | None,
+    *,
+    min_price: int = MIN_KRW_PRICE,
+    max_price: int = MAX_KRW_PRICE,
+) -> list[int]:
+    """Return KRW amounts in the requested semantic range.
+
+    Departure/Booking totals use the normal 50k+ plausibility floor.  Returning
+    flight selectors may show a *price adjustment* such as +₩0 or +₩25,000,
+    so callers for that phase explicitly pass ``min_price=0``.
+    """
     if not text:
         return []
     values = [int(raw.replace(",", "")) for raw in _KRW_SYMBOL_RE.findall(text)]
     values.extend(int(raw.replace(",", "")) for raw in _KRW_WORD_RE.findall(text))
-    return sorted({value for value in values if MIN_KRW_PRICE <= value <= MAX_KRW_PRICE})
+    return sorted({value for value in values if min_price <= value <= max_price})
 
 
 def normalize_text(text: str | None) -> str:
@@ -57,14 +68,9 @@ def flight_card_is_specific(
     destination: str,
     *,
     allow_missing_route: bool = False,
+    min_price: int = MIN_KRW_PRICE,
 ) -> bool:
-    """Accept one compact flight card and reject page/list containers.
-
-    Google sometimes omits the explicit route token on the returning-flight page.
-    In that phase callers may set ``allow_missing_route=True`` after independently
-    confirming the page is the Returning flights view.  A reverse-direction route
-    token is still rejected.
-    """
+    """Accept one compact flight card and reject page/list containers."""
     if not text or len(text) > 1800:
         return False
     lowered = normalize_text(text).lower()
@@ -77,7 +83,7 @@ def flight_card_is_specific(
     if not _FLIGHT_SHAPE_RE.search(text):
         return False
 
-    prices = parse_krw_prices(text)
+    prices = parse_krw_prices(text, min_price=min_price)
     if not 1 <= len(prices) <= 3:
         return False
 
@@ -90,12 +96,16 @@ def flight_card_is_specific(
     return forward == 1
 
 
-def candidate_from_mapping(value: Mapping[str, object]) -> UiFlightCandidate | None:
+def candidate_from_mapping(
+    value: Mapping[str, object],
+    *,
+    min_price: int = MIN_KRW_PRICE,
+) -> UiFlightCandidate | None:
     try:
         price = int(value.get("price"))
     except (TypeError, ValueError):
         return None
-    if not MIN_KRW_PRICE <= price <= MAX_KRW_PRICE:
+    if not min_price <= price <= MAX_KRW_PRICE:
         return None
     row_text = str(value.get("rowText") or "").strip()
     try:
@@ -113,20 +123,12 @@ def choose_lowest_candidate(
     destination: str,
     advertised_price: int | None = None,
     allow_missing_route: bool = False,
+    min_price: int = MIN_KRW_PRICE,
 ) -> Mapping[str, object] | None:
-    """Choose the lowest captured row, failing closed against a cheaper tab hint.
-
-    Captured candidates remain valid observations even if their transient price
-    span has already disappeared.  We therefore never require the original DOM
-    price node to still be connected here.
-
-    If Google advertised a cheaper value in the Cheapest tab, selecting a row
-    above that value would mean we missed the actual cheapest row.  In that case
-    return ``None`` instead of silently choosing a more expensive stable result.
-    """
+    """Choose the lowest preserved snapshot and fail closed on a cheaper hint."""
     eligible: list[tuple[int, float, Mapping[str, object]]] = []
     for raw in candidates:
-        candidate = candidate_from_mapping(raw)
+        candidate = candidate_from_mapping(raw, min_price=min_price)
         if candidate is None:
             continue
         if not flight_card_is_specific(
@@ -134,6 +136,7 @@ def choose_lowest_candidate(
             origin,
             destination,
             allow_missing_route=allow_missing_route,
+            min_price=min_price,
         ):
             continue
         if advertised_price is not None and candidate.price > advertised_price:
@@ -143,3 +146,27 @@ def choose_lowest_candidate(
         return None
     eligible.sort(key=lambda item: (item[0], item[1]))
     return eligible[0][2]
+
+
+def departure_capture_ready(
+    *,
+    candidate_count: int,
+    elapsed_ms: float,
+    advertised_stable_ms: float,
+    loading: bool,
+    capture_window_ms: int,
+) -> bool:
+    """Prevent an early one-row loading snapshot from becoming the cheapest.
+
+    While Google is still fetching, require at least two concrete flight rows.
+    If fetching has finished, one row is enough (important for thin routes).
+    In both cases the advertised Cheapest value must have stopped changing for
+    a short debounce period.
+    """
+    if candidate_count < 1 or elapsed_ms < capture_window_ms:
+        return False
+    if advertised_stable_ms < 250:
+        return False
+    if loading and candidate_count < 2:
+        return False
+    return True
