@@ -7,6 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 SLOT_DESIGN_CAPACITY = 10
+CURRENT_SLOT_LIMIT = 5
 
 
 class Settings(BaseSettings):
@@ -22,10 +23,10 @@ class Settings(BaseSettings):
     search_interval_hours: int = Field(default=2, ge=1, le=24)
     daily_summary_hour: int = Field(default=8, ge=0, le=23)
 
-    # The storage/domain layout is intentionally safe up to ten fixed IDs, but
-    # the current product release exposes only five active slots. Raising this
-    # later does not require a DB schema migration.
-    slot_active_limit: int = Field(default=5, ge=1, le=SLOT_DESIGN_CAPACITY)
+    # Storage/domain internals are safe up to ten fixed IDs, while this release
+    # intentionally exposes only five active slots. A later release can raise
+    # CURRENT_SLOT_LIMIT without a DB schema migration.
+    slot_active_limit: int = Field(default=CURRENT_SLOT_LIMIT, ge=1, le=CURRENT_SLOT_LIMIT)
 
     # Google Flights / Playwright
     browser_headless: bool = True
