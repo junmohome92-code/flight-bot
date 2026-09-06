@@ -1,26 +1,14 @@
-import importlib.util
-import sys
-from pathlib import Path
-
-
-ROOT = Path(__file__).resolve().parents[1]
-
-
-def _load(name: str, relative_path: str):
-    path = ROOT / relative_path
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-NAVER = _load("naver_flight_probe", "scripts/naver_flight_probe.py")
+from flight_bot.naver_api import (
+    build_payload,
+    build_result_url,
+    parse_sse_events,
+    rows_from_payload,
+    select_best_payload,
+)
 
 
 def test_naver_result_url_is_direct_round_trip_search():
-    url = NAVER.build_naver_url("CJJ", "TPE", "2026-09-18", "2026-09-20")
+    url = build_result_url("CJJ", "TPE", "2026-09-18", "2026-09-20")
     assert url.startswith("https://flight.naver.com/flights/international/")
     assert "CJJ:airport-TPE:airport-20260918" in url
     assert "TPE:airport-CJJ:airport-20260920" in url
@@ -30,7 +18,7 @@ def test_naver_result_url_is_direct_round_trip_search():
 
 
 def test_naver_api_payload_matches_verified_direct_round_trip_shape():
-    payload = NAVER.build_naver_api_payload("CJJ", "TPE", "2026-09-18", "2026-09-20")
+    payload = build_payload("CJJ", "TPE", "2026-09-18", "2026-09-20")
     assert payload["adultCount"] == 1
     assert payload["isNonstop"] is True
     assert payload["seatClass"] == "Y"
@@ -44,36 +32,40 @@ def test_naver_api_payload_matches_verified_direct_round_trip_shape():
     assert payload["flightFilter"]["sort"] == {"adultMinFare": 1}
 
 
-def _fixture_payload(price: int = 319620) -> dict:
+def _fixture_payload(price: int = 319620, *, completed: bool = True) -> dict:
     return {
-        "status": {"isCompleted": True, "lowestFare": {"direct": price}},
+        "status": {
+            "isCompleted": completed,
+            "lowestFare": {"direct": price},
+            "airlinesCodeMap": {"ZE": "이스타항공", "RF": "에어로케이"},
+        },
         "itineraries": [
             {
-                "itineraryId": "OUT1",
+                "itineraryId": "OUT-1",
                 "duration": 9000,
                 "segments": [
                     {
-                        "departure": {"airportCode": "CJJ", "date": "20260918", "time": "0305"},
-                        "arrival": {"airportCode": "TPE", "date": "20260918", "time": "0440"},
+                        "departure": {"airportCode": "CJJ", "date": "20260918", "time": "2340"},
+                        "arrival": {"airportCode": "TPE", "date": "20260919", "time": "0110"},
                         "marketingCarrier": {"airlineCode": "ZE", "flightNumber": "781"},
                     }
                 ],
             },
             {
-                "itineraryId": "RET1",
-                "duration": 9000,
+                "itineraryId": "RET-1",
+                "duration": 8700,
                 "segments": [
                     {
-                        "departure": {"airportCode": "TPE", "date": "20260920", "time": "1950"},
-                        "arrival": {"airportCode": "CJJ", "date": "20260920", "time": "2320"},
-                        "marketingCarrier": {"airlineCode": "ZE", "flightNumber": "782"},
+                        "departure": {"airportCode": "TPE", "date": "20260920", "time": "1315"},
+                        "arrival": {"airportCode": "CJJ", "date": "20260920", "time": "1640"},
+                        "marketingCarrier": {"airlineCode": "RF", "flightNumber": "322"},
                     }
                 ],
             },
         ],
         "fareMappings": [
             {
-                "itineraryIds": "OUT1-RET1",
+                "itineraryIds": "OUT-1-RET-1",
                 "fares": [
                     {
                         "partnerCode": "TEST",
@@ -87,41 +79,60 @@ def _fixture_payload(price: int = 319620) -> dict:
     }
 
 
-def test_naver_sse_parser_prefers_completed_valid_payload():
-    incomplete = _fixture_payload(350000)
-    incomplete["status"]["isCompleted"] = False
-    complete = _fixture_payload(319620)
+def test_sse_parser_prefers_completed_payload_with_more_real_data():
+    import json
+
+    incomplete = _fixture_payload(350000, completed=False)
+    complete = _fixture_payload(319620, completed=True)
     text = "\n".join(
         [
             "event: message",
-            "data: " + __import__("json").dumps(incomplete),
+            "data: " + json.dumps(incomplete, ensure_ascii=False),
             "",
-            "data: " + __import__("json").dumps(complete),
+            "data: " + json.dumps(complete, ensure_ascii=False),
         ]
     )
-    events = NAVER._parse_sse_events(text)
-    selected = NAVER._select_api_payload(events)
+    selected = select_best_payload(parse_sse_events(text))
     assert selected is not None
     assert selected["status"]["lowestFare"]["direct"] == 319620
 
 
-def test_naver_api_payload_builds_round_trip_rows():
-    rows = NAVER._rows_from_payload(_fixture_payload())
+def test_payload_builds_named_round_trip_row_even_when_itinerary_ids_have_hyphens():
+    rows = rows_from_payload(_fixture_payload())
     assert len(rows) == 1
     row = rows[0]
     assert row["price"] == 319620
-    assert row["times"] == ["03:05", "04:40", "19:50", "23:20"]
+    assert row["times"] == ["23:40", "01:10", "13:15", "16:40"]
     assert row["outbound_flight"] == "ZE781"
-    assert row["return_flight"] == "ZE782"
-    assert row["partner_code"] == "TEST"
+    assert row["return_flight"] == "RF322"
+    assert row["outbound_airline"] == "이스타항공"
+    assert row["return_airline"] == "에어로케이"
+    assert row["nonstop"] is True
 
 
-def test_naver_probe_saves_sse_diagnostics_not_browser_dom_artifacts():
-    source = (ROOT / "scripts/naver_flight_probe.py").read_text(encoding="utf-8")
-    assert "text/event-stream" in source
-    assert 'artifact_dir / "response.sse.txt"' in source
-    assert 'artifact_dir / "response.json"' in source
-    assert 'artifact_dir / "diagnostics.json"' in source
-    assert 'artifact_dir / "result.json"' in source
-    assert "page.frames" not in source
-    assert "querySelector" not in source
+def test_same_flight_pair_keeps_cheapest_seller_fare():
+    payload = _fixture_payload(330000)
+    payload["fareMappings"][0]["fares"].append(
+        {
+            "partnerCode": "CHEAPER",
+            "fareType": "A01",
+            "adult": {"totalFare": 319620},
+            "isConfirmed": True,
+        }
+    )
+    rows = rows_from_payload(payload)
+    assert len(rows) == 1
+    assert rows[0]["price"] == 319620
+    assert rows[0]["partner_code"] == "CHEAPER"
+
+
+def test_connection_itinerary_is_rejected_in_direct_only_product():
+    payload = _fixture_payload()
+    payload["itineraries"][0]["segments"].append(
+        {
+            "departure": {"airportCode": "XXX", "date": "20260918", "time": "1200"},
+            "arrival": {"airportCode": "TPE", "date": "20260918", "time": "1300"},
+            "marketingCarrier": {"airlineCode": "ZE", "flightNumber": "999"},
+        }
+    )
+    assert rows_from_payload(payload) == []
