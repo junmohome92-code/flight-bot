@@ -27,16 +27,23 @@ $env:GOOGLE_UI_SELECTION_WAIT_MS = '25000'
 $env:GOOGLE_UI_BOOKING_WAIT_MS = '15000'
 $env:GOOGLE_UI_DEPARTURE_CAPTURE_MS = '3500'
 $env:GOOGLE_UI_RETURN_CAPTURE_MS = '900'
+$env:GOOGLE_UI_PRICE_READY_WAIT_MS = '8000'
+$env:GOOGLE_UI_PRICE_RELOADS = '2'
+$env:GOOGLE_UI_BROWSER_RESTARTS = '1'
 
 $env:GOOGLE_UI_SEARCH_URL = 'https://www.google.com/travel/flights/search?tfs=CBwQAhoeEgoyMDI2LTA5LTE4agcIARIDQ0pKcgcIARIDVFBFGh4SCjIwMjYtMDktMjBqBwgBEgNUUEVyBwgBEgNDSkpAAUgBcAGCAQsI____________AZgBAQ&hl=en&gl=kr&curr=KRW'
 
 Remove-Item Env:BROWSER_CHANNEL -ErrorAction SilentlyContinue
 Remove-Item Env:GOOGLE_UI_CHEAPEST_URL -ErrorAction SilentlyContinue
 
-Write-Host 'Google Flights navigation-safe Cheapest + transient Booking probe'
+Write-Host 'Google Flights resilient Cheapest + transient Booking probe'
 Write-Host '  CJJ -> TPE -> CJJ'
 Write-Host '  2026-09-18 ~ 2026-09-20'
 Write-Host '  1 adult / Economy / KRW'
+Write-Host '  cold-load Price unavailable auto-reload: YES'
+Write-Host '  bounded full-page reloads: 2'
+Write-Host '  TargetClosed browser-session restart: 1'
+Write-Host '  same Edge profile retained across retries: YES'
 Write-Host '  observer active before Cheapest click: YES'
 Write-Host '  text-node mutation capture: YES'
 Write-Host '  explicit Cheapest/최저가 click: YES'
@@ -56,11 +63,11 @@ Write-Host "  selection wait: $($env:GOOGLE_UI_SELECTION_WAIT_MS) ms"
 Write-Host "  booking wait: $($env:GOOGLE_UI_BOOKING_WAIT_MS) ms"
 Write-Host ''
 
-& $VenvPython 'scripts\google_booking_pointer_probe_v6.py'
+& $VenvPython 'scripts\google_booking_pointer_probe_v7.py'
 if ($LASTEXITCODE -ne 0) {
-    throw "Google UI navigation-safe booking probe failed with exit code $LASTEXITCODE. Check artifacts\google-ui-win."
+    throw "Google UI resilient booking probe failed with exit code $LASTEXITCODE. Check artifacts\google-ui-win."
 }
 
 Write-Host ''
 Write-Host 'Probe complete.'
-Write-Host 'Paste the Cheapest/departure/return/Booking output and SUMMARY into the next ChatGPT chat.'
+Write-Host 'Paste the price-recovery/Cheapest/departure/return/Booking output and SUMMARY into the next ChatGPT chat.'
