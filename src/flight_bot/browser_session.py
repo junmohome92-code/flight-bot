@@ -12,9 +12,9 @@ class PlaywrightBrowserSession:
 
     Each search gets a brand-new BrowserContext, so cookies, HTTP cache,
     localStorage, IndexedDB and service-worker state are never inherited from a
-    previous two-hour observation. Unlike the old implementation, creating a
-    second context no longer destroys the first one; this is required for the
-    validated max-two concurrent slot policy.
+    previous two-hour observation. Up to two independent contexts may remain
+    live at once. Dead contexts are reaped before opening a replacement page so
+    a target-closed recovery cannot leak browser state/resources indefinitely.
     """
 
     def __init__(self, settings: Settings):
@@ -38,7 +38,22 @@ class PlaywrightBrowserSession:
             )
             return self._browser
 
+    async def _reap_dead_contexts(self) -> None:
+        for context in list(self._contexts):
+            try:
+                pages = list(context.pages)
+            except Exception:
+                continue
+            if pages and not all(page.is_closed() for page in pages):
+                continue
+            self._contexts.discard(context)
+            try:
+                await context.close()
+            except Exception:
+                pass
+
     async def _new_isolated_context(self) -> BrowserContext:
+        await self._reap_dead_contexts()
         browser = await self._ensure_started()
         context = await browser.new_context(
             locale="en-US",
