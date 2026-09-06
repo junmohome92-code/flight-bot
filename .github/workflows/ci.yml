@@ -10,55 +10,44 @@ permissions:
   contents: read
 
 jobs:
-  poc-contract-linux:
+  test-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install Naver POC test dependencies
-        run: python -m pip install -r provider-poc-requirements.txt
-      - name: Compile Naver/Telegram probes and contract tests
-        run: >-
-          python -m compileall -q
-          scripts/naver_flight_probe.py
-          scripts/naver_telegram_e2e.py
-          tests/test_provider_poc.py
-          tests/test_windows_test_harness.py
-      - name: Run Naver/Telegram POC contracts
-        run: pytest -q tests/test_provider_poc.py tests/test_windows_test_harness.py
-      - name: Verify retired Google and Skyscanner POC assets are absent
+      - name: Install project and tests
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -c constraints.txt -e '.[dev]'
+      - name: Compile source and scripts
+        run: python -m compileall -q src scripts tests
+      - name: Run full test suite
+        run: pytest -q
+      - name: Enforce browserless production runtime
         shell: bash
         run: |
           set -euo pipefail
+          test ! -e src/flight_bot/browser_session.py
+          test ! -e src/flight_bot/runtime_results_provider.py
+          test ! -e src/flight_bot/google_ui_contract.py
           test -z "$(find scripts -maxdepth 1 -type f -name 'google_*' -print -quit)"
-          test -z "$(find scripts -maxdepth 1 -type f -name 'skyscanner_*' -print -quit)"
-          test -z "$(find tests -maxdepth 1 -type f -name 'test_google_*' -print -quit)"
-          test ! -e 'flight-bot - test win/02-live-cjj-tpe-visible.cmd'
-          test ! -e 'flight-bot - test win/03-notification-test-menu.cmd'
-          test ! -e 'flight-bot - test win/03-SKYSCANNER-flight-test.bat'
-          test ! -e 'flight-bot - test win/live-cjj-tpe.ps1'
-          test ! -e 'flight-bot - test win/notification-test-menu.ps1'
-          test -e 'flight-bot - test win/02-NAVER-flight-test.bat'
-          test -e 'flight-bot - test win/03-NAVER-TELEGRAM-E2E.bat'
-          test -e 'flight-bot - test win/telegram-test.env.example'
+          ! grep -RniE 'from playwright|import playwright|python -m playwright|playwright>=' src Dockerfile pyproject.toml constraints.txt compose.yaml
+          ! grep -RniE 'chromium|msedge|browser_headless|browser_profile|browser_debug' src Dockerfile pyproject.toml compose.yaml .env.example
+      - name: Build lightweight Docker image
+        run: docker build --pull -t flight-bot:ci .
 
-  poc-contract-windows:
+  test-windows-harness:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install Naver POC test dependencies
-        run: python -m pip install -r provider-poc-requirements.txt
-      - name: Compile Naver/Telegram probes and contract tests
-        run: >-
-          python -m compileall -q
-          scripts/naver_flight_probe.py
-          scripts/naver_telegram_e2e.py
-          tests/test_provider_poc.py
-          tests/test_windows_test_harness.py
-      - name: Run Naver/Telegram POC contracts
+      - name: Install Windows contract test dependency
+        run: python -m pip install pytest==8.4.2
+      - name: Compile browserless Naver scripts
+        run: python -m compileall -q src scripts tests/test_provider_poc.py tests/test_windows_test_harness.py
+      - name: Run Naver SSE and Windows launcher contracts
         run: python -m pytest -q tests/test_provider_poc.py tests/test_windows_test_harness.py
