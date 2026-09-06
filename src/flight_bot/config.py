@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     browser_timeout_ms: int = 45_000
     browser_block_assets: bool = True
     browser_debug_dir: str = ""
+    browser_profile_dir: str = ""
     google_language: str = "en"
     google_currency: str = "KRW"
     google_gl: str = "kr"
@@ -32,6 +33,8 @@ class Settings(BaseSettings):
 
     kakao_skill_secret: str = ""
     kakao_allowed_user_ids: str = ""
+
+    admin_secret: str = ""
 
     @staticmethod
     def _csv_set(value: str) -> set[str]:
@@ -51,10 +54,38 @@ class Settings(BaseSettings):
 
     @property
     def scheduled_hours(self) -> list[int]:
-        hours = sorted({int(x.strip()) for x in self.check_hours.split(",") if x.strip()})
+        try:
+            hours = sorted({int(x.strip()) for x in self.check_hours.split(",") if x.strip()})
+        except ValueError as exc:
+            raise ValueError("CHECK_HOURS must be comma-separated integers 0-23") from exc
         if any(hour < 0 or hour > 23 for hour in hours):
             raise ValueError("CHECK_HOURS must contain 0-23 only")
         return hours
+
+    def runtime_security_errors(self) -> list[str]:
+        """Return unsafe production channel combinations.
+
+        Bot credentials without allowlists are fail-open by nature. Production
+        startup rejects those combinations instead of silently exposing all
+        commands to anyone who can reach the bot/channel.
+        """
+        if self.app_env.lower() != "production":
+            return []
+        errors: list[str] = []
+        if self.telegram_bot_token and not self.telegram_chat_ids:
+            errors.append("TELEGRAM_BOT_TOKEN requires TELEGRAM_ALLOWED_CHAT_IDS in production")
+        if self.discord_bot_token and not self.discord_channel_ids:
+            errors.append("DISCORD_BOT_TOKEN requires DISCORD_ALLOWED_CHANNEL_IDS in production")
+        if self.kakao_skill_secret and not self.kakao_user_ids:
+            errors.append("KAKAO_SKILL_SECRET requires KAKAO_ALLOWED_USER_IDS in production")
+        if self.kakao_user_ids and not self.kakao_skill_secret:
+            errors.append("KAKAO_ALLOWED_USER_IDS requires KAKAO_SKILL_SECRET")
+        return errors
+
+    def validate_runtime_security(self) -> None:
+        errors = self.runtime_security_errors()
+        if errors:
+            raise RuntimeError("Unsafe production configuration: " + "; ".join(errors))
 
 
 @lru_cache
