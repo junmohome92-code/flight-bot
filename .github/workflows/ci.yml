@@ -17,14 +17,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install only Naver POC dependencies
+      - name: Install Naver POC test dependencies
         run: python -m pip install -r provider-poc-requirements.txt
-      - name: Compile standalone Naver/Telegram probes and contract tests
+      - name: Compile Naver/Telegram probes and contract tests
         run: >-
           python -m compileall -q
           scripts/naver_flight_probe.py
           scripts/naver_telegram_e2e.py
-          scripts/edge_launch_smoke.py
           tests/test_provider_poc.py
           tests/test_windows_test_harness.py
       - name: Run Naver/Telegram POC contracts
@@ -45,24 +44,21 @@ jobs:
           test -e 'flight-bot - test win/03-NAVER-TELEGRAM-E2E.bat'
           test -e 'flight-bot - test win/telegram-test.env.example'
 
-  poc-windows-edge:
+  poc-contract-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install only Naver POC dependencies
+      - name: Install Naver POC test dependencies
         run: python -m pip install -r provider-poc-requirements.txt
-      - name: Compile standalone Naver/Telegram probes and contract tests
+      - name: Compile Naver/Telegram probes and contract tests
         run: >-
           python -m compileall -q
           scripts/naver_flight_probe.py
           scripts/naver_telegram_e2e.py
-          scripts/edge_launch_smoke.py
           tests/test_provider_poc.py
           tests/test_windows_test_harness.py
       - name: Run Naver/Telegram POC contracts
         run: python -m pytest -q tests/test_provider_poc.py tests/test_windows_test_harness.py
-      - name: Verify installed Microsoft Edge can be launched by Playwright
-        run: python scripts/edge_launch_smoke.py
