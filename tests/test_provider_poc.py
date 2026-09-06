@@ -1,4 +1,5 @@
 import importlib.util
+import sys
 from pathlib import Path
 
 
@@ -10,12 +11,12 @@ def _load(name: str, relative_path: str):
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
 
 NAVER = _load("naver_flight_probe", "scripts/naver_flight_probe.py")
-SKY = _load("skyscanner_flight_probe", "scripts/skyscanner_flight_probe.py")
 
 
 def test_naver_poc_url_is_direct_round_trip_search():
@@ -28,14 +29,16 @@ def test_naver_poc_url_is_direct_round_trip_search():
     assert "isDirect=true" in url
 
 
-def test_skyscanner_poc_url_is_direct_round_trip_search():
-    url = SKY.build_skyscanner_url("CJJ", "TPE", "2026-09-18", "2026-09-20")
-    assert url.startswith("https://www.skyscanner.co.kr/transport/flights/cjj/tpe/260918/260920/")
-    assert "adultsv2=1" in url
-    assert "cabinclass=economy" in url
-    assert "preferdirects=true" in url
-    assert "stops=direct" in url
+def test_naver_extractor_is_semantic_and_diagnostic():
+    source = NAVER._COLLECT_ROWS_JS
+    assert "price_anchors" in source
+    assert "allElements" in source
+    assert "round_trip_evidence" in source
+    assert "body-wide" not in source.lower()
 
 
-def test_provider_pocs_are_independent_modules():
-    assert NAVER.build_naver_url is not SKY.build_skyscanner_url
+def test_naver_probe_collects_every_frame_and_saves_diagnostics():
+    source = (ROOT / "scripts/naver_flight_probe.py").read_text(encoding="utf-8")
+    assert "for index, frame in enumerate(page.frames)" in source
+    assert 'artifact_dir / "diagnostics.json"' in source
+    assert 'artifact_dir / "page.html"' in source
