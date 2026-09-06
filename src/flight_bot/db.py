@@ -9,7 +9,7 @@ from uuid import uuid4
 from .config import SLOT_DESIGN_CAPACITY
 from .models import ALERT_ARMED, ALERTED, FlightOffer, WatchSlot
 
-DEFAULT_ACTIVE_SLOT_LIMIT = 5
+DEFAULT_ACTIVE_SLOT_LIMIT = SLOT_DESIGN_CAPACITY
 
 
 class StaleSlotError(RuntimeError):
@@ -239,8 +239,7 @@ class Database:
             slot_id = next((idx for idx in range(1, self.slot_limit + 1) if idx not in occupied), None)
             if slot_id is None:
                 raise ValueError(
-                    f"현재 사용 가능한 감시 슬롯은 {self.slot_limit}개이며 모두 사용 중입니다. "
-                    f"구조상 최대 {SLOT_DESIGN_CAPACITY}개까지 확장 가능합니다."
+                    f"감시 슬롯 {self.slot_limit}개가 모두 사용 중입니다. 기존 슬롯을 삭제해 주세요."
                 )
             conn.execute(
                 """INSERT INTO watch_slots
