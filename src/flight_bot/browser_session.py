@@ -8,12 +8,13 @@ from .config import Settings
 
 
 class PlaywrightBrowserSession:
-    """Reuse the Chromium process while isolating every Google price search.
+    """Reuse Chromium while giving every Google price search fresh storage.
 
     Google Flights observations must not inherit cookies, HTTP cache, local
     storage, IndexedDB or service-worker state from the previous two-hour scan.
     We therefore keep only the Chromium *process* warm and create a brand-new
-    BrowserContext for each search. Closing that context destroys its storage.
+    BrowserContext for each search. Before the next search starts, every prior
+    context is destroyed.
 
     ``BROWSER_PROFILE_DIR`` remains accepted by Settings for compatibility with
     older deployments, but runtime price searches intentionally do not use it.
@@ -40,7 +41,19 @@ class PlaywrightBrowserSession:
             )
             return self._browser
 
+    async def _discard_old_contexts(self) -> None:
+        old = list(self._contexts)
+        self._contexts.clear()
+        for context in old:
+            try:
+                await context.close()
+            except Exception:
+                pass
+
     async def _new_isolated_context(self) -> BrowserContext:
+        # Searches are serialized by FlightService. Destroying the previous
+        # context here is therefore safe and guarantees a clean observation.
+        await self._discard_old_contexts()
         browser = await self._ensure_started()
         context = await browser.new_context(
             locale="en-US",
@@ -67,7 +80,7 @@ class PlaywrightBrowserSession:
         return page
 
     async def release_page(self, page: Page) -> None:
-        """Destroy the page's whole context so no search state survives."""
+        """Destroy the page's whole context immediately when supported."""
         try:
             context = page.context
         except Exception:
@@ -85,16 +98,10 @@ class PlaywrightBrowserSession:
             pass
 
     async def close(self) -> None:
-        contexts, browser, playwright = list(self._contexts), self._browser, self._playwright
-        self._contexts.clear()
+        await self._discard_old_contexts()
+        browser, playwright = self._browser, self._playwright
         self._browser = None
         self._playwright = None
-
-        for context in contexts:
-            try:
-                await context.close()
-            except Exception:
-                pass
         if browser is not None:
             try:
                 await browser.close()
