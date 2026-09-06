@@ -12,12 +12,16 @@ _KRW_SYMBOL_RE = re.compile(r"₩\s*([0-9][0-9,]*)")
 _KRW_WORD_RE = re.compile(r"([0-9][0-9,]*)\s+(?:South Korean won|Korean won|KRW)", re.I)
 _TIME_RE = re.compile(r"\b\d{1,2}:\d{2}(?:\s?[AP]M)?\b", re.I)
 _FLIGHT_SHAPE_RE = re.compile(r"nonstop|stops?|직항|경유|\bhr\b|시간", re.I)
+
+# Hard page/list-level markers. Google can place section labels such as
+# "Top departing flights" or "Other departing flights" inside the same compact
+# wrapper as one real flight card, so those labels are not sufficient by
+# themselves to prove that a candidate is page-wide. Compactness is still
+# enforced below by text length, 2-4 times and 1-3 prices.
 _BROAD_MARKERS = (
     "flight search",
     "search results",
     "all filters",
-    "top departing flights",
-    "other departing flights",
     "sorted by",
     "checking prices from multiple sources",
     "searching nearby airports",
@@ -93,6 +97,8 @@ def flight_card_is_specific(
     forward = _route_count(text, origin, destination)
     reverse = _route_count(text, destination, origin)
     if reverse:
+        return False
+    if forward > 1:
         return False
     if allow_missing_route:
         return forward in {0, 1}
@@ -184,9 +190,9 @@ def departure_capture_ready(
     """Require both the Cheapest hint and row minimum to settle before clicking.
 
     A fixed timeout alone was unsafe: Google can briefly expose one expensive
-    row and later replace it with the real Cheapest result.  The gate therefore
+    row and later replace it with the real Cheapest result. The gate therefore
     requires the candidate minimum and advertised Cheapest value to remain
-    stable.  While Google still reports a loading state, at least two flight
+    stable. While Google still reports a loading state, at least two flight
     cards and a longer debounce are required.
     """
     if candidate_count < 1 or candidate_lowest is None:

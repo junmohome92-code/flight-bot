@@ -22,9 +22,9 @@ async def _arm_actual_click_boundary(control: Locator) -> None:
     """Stamp the capture state when the real pointer gesture starts.
 
     Capture is intentionally active before clicking Cheapest so transition rows
-    cannot be missed.  The old post-filter then discarded anything more than
+    cannot be missed. The old post-filter then discarded anything more than
     350 ms before selected-state confirmation, which could throw away exactly
-    those transient rows.  A pointer/mouse event boundary lets us reject rows
+    those transient rows. A pointer/mouse event boundary lets us reject rows
     from the pre-click Best view without depending on how late Google exposes
     aria-selected/aria-checked.
     """
@@ -66,7 +66,7 @@ async def _ensure_click_boundary_fallback(page: Page) -> float | None:
 
 
 async def select_cheapest_tab_v6(page: Page, timeout_ms: int) -> dict[str, Any]:
-    # Keep the observer active before the real click.  Only the later candidate
+    # Keep the observer active before the real click. Only the later candidate
     # boundary changes: it is tied to the actual pointer gesture, not to delayed
     # selected-state confirmation.
     await base.set_phase(page, "departure", cheapest_requested=True)
@@ -143,9 +143,9 @@ async def capture_state_v6(page: Page) -> dict:
 def phase_candidates_v6(state: dict, phase: str) -> list[dict]:
     """Keep departure rows observed from the actual click gesture onward.
 
-    The previous boundary was ``max(requested, selected - 350 ms)``.  When
+    The previous boundary was ``max(requested, selected - 350 ms)``. When
     selected-state confirmation lagged the visual transition, a correctly
-    preserved transient row could be captured and then discarded.  The click
+    preserved transient row could be captured and then discarded. The click
     event is the semantic boundary we actually need: pre-click Best rows are
     excluded, while every post-click Cheapest transition row survives.
     """
@@ -203,6 +203,9 @@ def _departure_diagnostics(state: dict) -> None:
     print(f"departure_pre_click_candidate_prices={prices(dropped)}")
     print(f"departure_rejected_broad={state.get('rejectedBroad', 0)}")
     print(f"departure_rejected_source={state.get('rejectedSource', 0)}")
+    print(f"departure_rejected_shape={state.get('rejectedShape', 0)}")
+    print(f"departure_rejected_route={state.get('rejectedRoute', 0)}")
+    print(f"departure_rejected_price_context={state.get('rejectedPriceContext', 0)}")
     print(f"departure_requested_at_ms={state.get('cheapestRequestedAtMs')}")
     print(f"departure_click_started_at_ms={state.get('cheapestClickStartedAtMs')}")
     print(f"departure_selected_at_ms={state.get('cheapestSelectedAtMs')}")
@@ -212,6 +215,7 @@ def _departure_diagnostics(state: dict) -> None:
                 "price": item.get("price"),
                 "seenAtMs": item.get("seenAtMs"),
                 "selectedAtSeen": item.get("cheapestSelectedAtSeen"),
+                "routeCount": item.get("routeCount"),
                 "sourceText": str(item.get("sourceText") or "")[:160],
                 "rowText": str(item.get("rowText") or "")[:420],
             }
@@ -220,19 +224,99 @@ def _departure_diagnostics(state: dict) -> None:
         print(f"departure_raw_candidate_sample={json.dumps(sample, ensure_ascii=False)[:6000]}")
 
 
-async def wait_for_candidate_v6(*args, **kwargs):
-    candidate, state, policy = await _ORIGINAL_WAIT_FOR_CANDIDATE(*args, **kwargs)
-    phase = kwargs.get("phase")
-    if phase is None and len(args) >= 2:
-        phase = args[1]
-    if phase == "departure" and not candidate:
-        _departure_diagnostics(state)
-    return candidate, state, policy
+async def wait_for_candidate_v6(
+    page: Page,
+    *,
+    phase: str,
+    origin: str,
+    destination: str,
+    timeout_ms: int,
+    capture_window_ms: int,
+    allow_missing_route: bool,
+    min_price: int,
+):
+    """Use fixed-route page context when Google omits route tokens from cards.
+
+    The Windows acceptance URL itself fixes the departure route. Google does not
+    consistently repeat ``CJJ-TPE`` inside every visible card, so requiring that
+    exact token made every otherwise-specific card disappear. For departure we
+    therefore allow a missing route token, while the DOM capture and contract
+    validator still reject an explicitly reversed route, page-wide containers,
+    cards without 2-4 times/flight shape, and implausible/multi-price contexts.
+    """
+    if phase != "departure":
+        return await _ORIGINAL_WAIT_FOR_CANDIDATE(
+            page,
+            phase=phase,
+            origin=origin,
+            destination=destination,
+            timeout_ms=timeout_ms,
+            capture_window_ms=capture_window_ms,
+            allow_missing_route=allow_missing_route,
+            min_price=min_price,
+        )
+
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+    latest: dict = {"phase": "unknown", "candidates": []}
+    last_lowest: int | None = None
+    low_changed_at = time.monotonic()
+
+    while asyncio.get_running_loop().time() < deadline:
+        latest = await base.capture_state(page)
+        candidates = base.phase_candidates(latest, phase)
+        eligible = base.eligible_candidates(
+            candidates,
+            origin=origin,
+            destination=destination,
+            allow_missing_route=True,
+            min_price=min_price,
+        )
+        current_lowest = int(eligible[0]["price"]) if eligible else None
+        if current_lowest != last_lowest:
+            last_lowest = current_lowest
+            low_changed_at = time.monotonic()
+        low_stable_ms = (time.monotonic() - low_changed_at) * 1000
+
+        now_ms = float(latest.get("nowMs") or 0.0)
+        selected_ms = float(latest.get("cheapestSelectedAtMs") or 0.0)
+        started_ms = selected_ms or float(latest.get("phaseStartedAtMs") or now_ms)
+        elapsed_ms = max(0.0, now_ms - started_ms)
+        raw_advertised = latest.get("advertisedPrice")
+        advertised = int(raw_advertised) if raw_advertised is not None else None
+        changed_ms = float(latest.get("advertisedChangedAtMs") or started_ms)
+        advertised_stable_ms = max(0.0, now_ms - changed_ms)
+        ready = base.departure_capture_ready(
+            candidate_count=len(eligible),
+            elapsed_ms=elapsed_ms,
+            advertised_stable_ms=advertised_stable_ms,
+            candidate_low_stable_ms=low_stable_ms,
+            loading=bool(latest.get("cheapestLoading", True)),
+            capture_window_ms=capture_window_ms,
+            advertised_price=advertised,
+            candidate_lowest=current_lowest,
+        )
+        if ready:
+            chosen = base.choose_lowest_candidate(
+                candidates,
+                origin=origin,
+                destination=destination,
+                advertised_price=advertised,
+                allow_missing_route=True,
+                min_price=min_price,
+            )
+            if chosen is not None:
+                return dict(chosen), latest, "explicit-cheapest-settled-lowest"
+        await page.wait_for_timeout(15)
+
+    _departure_diagnostics(latest)
+    return {}, latest, "timeout"
 
 
-# Keep the existing DOM observer, candidate shape rules, advertised-price guard,
-# stale-pointer safety, Returning navigation and Booking scoping unchanged.  The
-# only behavioral correction is the departure candidate time boundary.
+# Keep the existing advertised-price guard, stale-pointer safety, Returning
+# navigation and Booking scoping unchanged. V6 now also accepts a compact
+# departure card when Google's current UI omits the route token from that card;
+# the fixed search URL supplies route context and an explicitly reversed route
+# remains rejected.
 base.select_cheapest_tab = select_cheapest_tab_v6
 base.capture_state = capture_state_v6
 base.phase_candidates = phase_candidates_v6
