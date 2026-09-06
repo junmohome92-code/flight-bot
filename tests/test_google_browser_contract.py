@@ -16,12 +16,17 @@ pytestmark = pytest.mark.skipif(
 
 _DOM_CAPTURE = Path(__file__).resolve().parents[1] / "scripts" / "google_dom_capture.js"
 
+# Model the current live failure more closely: Google can omit an explicit
+# CJJ-TPE token from a compact card, and a section label can be part of the same
+# small wrapper. The card is still specific because it has exactly one price,
+# two times and flight-shape information. Page-wide containers remain rejected.
 _DEPARTURE_HTML = """<!doctype html>
 <html><body>
 <button role="tab" aria-selected="false" id="cheap">Cheapest from ₩418,500</button>
 <div id="dep" style="cursor:pointer">
+  <span>Other departing flights</span>
   <span>11:40 PM</span><span>1:10 AM</span><span>EASTAR JET</span>
-  <span>2 hr 30 min</span><span>CJJ–TPE</span><span>Nonstop</span>
+  <span>2 hr 30 min</span><span>Nonstop</span>
   <span id="dep-price">₩418,500</span><span>round trip</span>
 </div>
 </body></html>"""
@@ -103,12 +108,17 @@ async def test_capture_survives_text_mutation_and_full_return_navigation():
                 selected: window.__flightBotCaptureV4.cheapestSelected,
                 advertised: window.__flightBotCaptureV4.advertisedPrice,
                 prices: window.__flightBotCaptureV4.candidates
-                    .filter(x => x.phase === 'departure').map(x => x.price)
+                    .filter(x => x.phase === 'departure').map(x => x.price),
+                rows: window.__flightBotCaptureV4.candidates
+                    .filter(x => x.phase === 'departure').map(x => ({price: x.price, routeCount: x.routeCount, rowText: x.rowText}))
             })"""
         )
         assert departure["selected"] is True
         assert departure["advertised"] == 311811
         assert 311811 in departure["prices"]
+        captured = next(item for item in departure["rows"] if item["price"] == 311811)
+        assert captured["routeCount"] == 0
+        assert "Other departing flights" in captured["rowText"]
 
         # Persist the next phase exactly as the real probe does before outbound
         # click. A full document navigation must recreate V4 capture as active.
