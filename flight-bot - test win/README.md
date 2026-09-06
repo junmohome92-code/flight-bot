@@ -6,19 +6,19 @@ Windows 10/11에서 현재 `flight-bot` 소스의 Google Flights 실가격 경�
 
 ## 실행
 
-최초 1회:
+최초 1회 또는 dependency 변경 후:
 
 ```text
 01-setup-and-unit-test.cmd
 ```
 
-이후 최신 ZIP으로 갱신했더라도 `.venv-win`이 그대로 있으면 live 검증은:
+`.venv-win`이 이미 있고 최신 ZIP으로 코드만 바꿨다면:
 
 ```text
 02-live-cjj-tpe-visible.cmd
 ```
 
-만 실행하면 됩니다.
+만 실행하면 됩니다. 현재 acceptance는 **visible native Edge 전용**입니다. 예전 headless launcher는 실제 active probe와 모순되어 제거했습니다.
 
 ## acceptance 조건
 
@@ -29,62 +29,84 @@ CJJ (청주) → TPE (타이베이) → CJJ
 경유·혼합·별도티켓 허용
 ```
 
-실시간 가격이므로 특정 금액을 고정 성공값으로 강제하지 않습니다.
+실시간 가격이므로 특정 금액을 성공값으로 고정하지 않습니다.
 
-## 현재 02가 검증하는 것
+## 현재 구조
 
-active script:
+active Python:
 
 ```text
 scripts/google_booking_pointer_probe.py
 ```
 
-현재 방식:
+DOM capture:
 
 ```text
-Google Cheapest acceptance URL 직접 open
-→ 페이지 초기 transient 가격 row snapshot
-→ 사라진 price span도 snapshot 유지
-→ 출국 후보 900ms 수집
-→ Cheapest advertised price보다 비싼 fallback 금지
-→ 최저 출국편 실제 mouse pointer click
-→ Returning flights 화면 확인
-→ 귀국 후보 650ms 수집
-→ 최저 귀국편 mouse pointer click
-→ Google Booking options CTA 주변 가격 확인
+scripts/google_dom_capture.js
 ```
 
-page 전체의 가장 작은 원화 숫자를 가져오지 않습니다.
+공통 순수 계약:
 
-## 왜 이전에 922,965원을 골랐나
+```text
+src/flight_bot/google_ui_contract.py
+```
 
-이전 pointer probe는 후보를 선택할 때 price source가 아직 DOM에 연결돼 있는지를 다시 검사했습니다.
+흐름:
 
-33만원대 최저가 span은 잠깐 나타났다 사라져 후보에서 빠졌고, 오래 남은 922,965원 row가 대신 선택됐습니다.
+```text
+일반 Google Flights 검색 URL open
+→ init script가 첫 document byte부터 가격/DOM 변화 감시
+→ Cheapest/최저가 클릭 요청 직전 departure phase 표시
+→ Cheapest/최저가를 실제 클릭
+→ aria-selected/pressed 확인
+→ characterData(Text node) 포함 transient 가격 변화 snapshot
+→ Cheapest 표시가 + 실제 row 최저가가 둘 다 안정될 때까지 대기
+→ 비싼 임시 row fallback 금지
+→ 선택 row 좌표가 아직 같은 flight card인지 재검증
+→ 실제 Playwright mouse click
+→ 출국 선택 전 sessionStorage에 returning phase 기록
+→ full navigation이 발생해도 새 document init script가 즉시 returning capture 시작
+→ Returning flights marker 주변 실제 귀국 row 수집
+→ +₩0 같은 귀국 추가금도 허용
+→ 귀국 row pointer click
+→ Booking options marker가 실제 존재하는 상태에서만 CTA 가격 수집
+```
 
-이번 버전은 price/row/클릭 좌표를 나타나는 즉시 snapshot으로 보존하므로 price span이 사라져도 후보 기록을 버리지 않습니다.
+page 전체 KRW minimum과 DOM `.click()` fallback은 사용하지 않습니다.
 
-또 Cheapest 탭에서 더 낮은 가격이 확인됐는데 그 row를 못 잡았다면 비싼 항공편을 대신 선택하지 않고 실패합니다.
+## 현재 fail-closed 규칙
 
-## 정상적으로 보고 싶은 출력
+예를 들어 사람이 보는 Cheapest가 `₩311,811`인데 봇이 `₩384,361` 또는 `₩418,500`만 잡았다면 비싼 값을 대신 선택하지 않고 실패해야 정상입니다.
+
+또 transient row가 사라진 뒤 과거 좌표에 다른 항공편이 들어왔다면 좌표를 그대로 클릭하지 않습니다. 좌표 아래 DOM이 snapshot과 같은 시간/route flight card인지 다시 검사한 뒤에만 mouse click을 보냅니다.
+
+## 정상 출력
+
+```text
+=== EXPLICIT CHEAPEST SELECTION ===
+cheapest_tab_found=True
+cheapest_tab_clicked=True
+cheapest_tab_selected=True
+```
 
 출국:
 
 ```text
 departure_selected=... KRW
-departure_selection_policy=advertised-guarded-lowest 또는 captured-lowest
+departure_selection_policy=explicit-cheapest-settled-lowest
+departure_cheapest_tab_selected=True
 departure_advertised=...
 departure_candidate_prices=...
-departure_pointer_click_mode=live-marked-anchor 또는 captured-coordinate
-departure_pointer_click_sent=True
+departure_pointer_click_mode=...
 departure_navigation_confirmed=True
 ```
 
 귀국:
 
 ```text
-return_selected=... KRW
-return_selection_policy=captured-lowest
+return_selected=...
+return_selection_policy=return-settled-lowest
+return_price_kind=adjustment 또는 displayed
 return_candidate_prices=...
 return_pointer_click_sent=True
 ```
@@ -101,27 +123,17 @@ booking_option_candidates=1 이상
 ```text
 === SUMMARY ===
 departure_observed=...
-return_selection_price=...
+return_displayed_price=...
+return_price_kind=...
 google_booking_option=...
 observed=True
 booking_option_visible=True
 external_checkout_verified=False
 verified=False
-acceptance=GOOGLE_BOOKING_OPTION_REACHED_FROM_PRESERVED_TRANSIENT_SNAPSHOTS
+acceptance=GOOGLE_BOOKING_OPTION_REACHED_WITH_NAVIGATION_SAFE_CAPTURE
 ```
 
-Google Booking option은 아직 외부 판매처의 최종 checkout 가격이 아니므로 성공해도 `verified=False`가 정상입니다.
-
-## fail-closed 예
-
-Cheapest 탭이 약 335,000원을 광고하는데 922,965원 같은 비싼 row만 snapshot된 경우:
-
-```text
-Cheapest tab advertised a lower price than every captured departure row;
-refusing expensive fallback
-```
-
-가 정상입니다. 이런 경우 비싼 row를 대신 클릭하면 안 됩니다.
+Google Booking option은 외부 판매처 checkout final total이 아니므로 여기까지 성공해도 `verified=False`가 정상입니다.
 
 ## 실패 artifact
 
@@ -134,17 +146,17 @@ artifacts/google-ui-win/*.txt
 artifacts/google-ui-win/*.html
 ```
 
-귀국편 0건이면 `snapshot-return-state.json`의 `returningMarker`와 `candidates`가 가장 중요합니다.
+특히 귀국 0건이면 `snapshot-return-state.json`에서 `phase`, `returningMarker`, `returningMarkerAtMs`, `candidates`를 확인합니다.
 
 ## 브라우저
 
-live test는 개인 Edge/Chrome profile을 사용하지 않고 전용 profile을 만듭니다.
+개인 Edge/Chrome profile을 사용하지 않습니다.
 
 ```text
 artifacts/google-profile-win/
 ```
 
-현재 acceptance는 native Microsoft Edge + Playwright CDP 연결을 사용합니다.
+native Microsoft Edge를 별도 profile + CDP로 연결합니다.
 
 ## PowerShell 직접 실행
 
@@ -158,6 +170,6 @@ cd 'C:\work\flight-bot\flight-bot - test win'
 
 - API key 불필요
 - Google Flights는 공개 개발자 API가 아니므로 UI/DOM/session/IP 변화 가능
-- GitHub hosted Windows에서는 실제 flight-row 가격 DOM이 내려오지 않는 것이 확인돼 live price 검증용으로 사용하지 않음
+- GitHub hosted Windows는 실제 flight-row 가격 DOM이 내려오지 않아 실가격 acceptance 환경으로 사용하지 않음
 - 가격/수하물 확인 실패 시 값을 추정하지 않음
 - 외부 판매처 checkout final total 확인 전에는 verified alert 금지
