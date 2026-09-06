@@ -31,10 +31,10 @@ jobs:
       - run: python -m pip install -c constraints.txt -e '.[dev]'
       - run: python -m compileall -q src scripts tests
       - run: python -m pytest -q
-      - name: Parse Windows notification test menu
-        shell: pwsh
+      - name: Parse notification menu with Windows PowerShell 5.1
+        shell: powershell
         run: |
-          $path = 'flight-bot - test win/notification-test-menu-v2.ps1'
+          $path = 'flight-bot - test win/notification-test-menu.ps1'
           $tokens = $null
           $errors = $null
           [System.Management.Automation.Language.Parser]::ParseFile(
@@ -44,6 +44,21 @@ jobs:
             $errors | Format-List | Out-String | Write-Error
             exit 1
           }
+          Write-Host "Windows PowerShell parser OK: $($PSVersionTable.PSVersion)"
+      - name: Parse notification menu with PowerShell 7
+        shell: pwsh
+        run: |
+          $path = 'flight-bot - test win/notification-test-menu.ps1'
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path $path), [ref]$tokens, [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | Format-List | Out-String | Write-Error
+            exit 1
+          }
+          Write-Host "PowerShell 7 parser OK: $($PSVersionTable.PSVersion)"
       - name: Verify Windows Playwright Chromium install and launch
         shell: pwsh
         run: |
@@ -77,6 +92,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Validate Compose production contract
+        shell: bash
+        run: |
+          cp .env.example .env
+          ADMIN_SECRET=ci-secret docker compose config >/tmp/compose-rendered.yaml
+          grep -q 'DATABASE_PATH: /data/flight_bot.db' /tmp/compose-rendered.yaml
+          grep -q 'BROWSER_HEADLESS: "true"' /tmp/compose-rendered.yaml || grep -q 'BROWSER_HEADLESS: true' /tmp/compose-rendered.yaml
+          grep -q 'BROWSER_DEBUG_DIR: /debug' /tmp/compose-rendered.yaml
       - name: Build production image
         run: docker build -t flight-bot-ci .
       - name: Run container and verify health/admin test surface
@@ -128,8 +151,6 @@ jobs:
               with urllib.request.urlopen(request, timeout=10) as response:
                   return json.load(response)
 
-          # Nonexistent slot avoids any live Google call while proving that the
-          # Docker image exposes both manual notification test routes.
           target = post('/admin/check-slot/10')
           assert target['accepted'] is True
           assert target['mode'] == 'target-check-slot'
