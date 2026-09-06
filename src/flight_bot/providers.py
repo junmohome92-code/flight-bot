@@ -4,9 +4,10 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from playwright.async_api import Browser, BrowserContext, Locator, Page, async_playwright
+from playwright.async_api import Locator, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from .browser_session import PlaywrightBrowserSession
 from .config import Settings
 from .google_ui_contract import flight_card_is_specific, parse_krw_prices
 from .models import FlightOffer, WatchSlot
@@ -39,29 +40,32 @@ def parse_all_krw_prices(text: str | None) -> list[int]:
 
 
 class GoogleFlightsPlaywrightProvider:
-    """Legacy runtime provider kept fail-closed until the UI acceptance gate passes.
+    """Legacy runtime provider kept fail-closed until UI acceptance completes.
 
-    Important boundaries:
+    Boundaries:
     - It may return a row-scoped Google *observed* price.
-    - It must never use a page-wide KRW minimum.
-    - It must never set ``price_verified=True``.  The project verification
-      contract requires an external seller checkout/final-total check, which is
-      not implemented in this legacy provider.
+    - It never uses a page-wide KRW minimum.
+    - It never sets ``price_verified=True`` because the verification contract is
+      an external seller checkout final total, not a Google Booking option.
+    - It is hard-disabled for target alerts through ``accepted_for_alerts``.
 
-    The accepted transient/pointer flow is being validated separately before
-    replacing this class.
+    The browser session is reused across sequential searches to avoid launching
+    Chromium for every slot. This improves runtime cost but does not make the
+    legacy provider an accepted production price source.
     """
 
     name = "google-playwright-legacy-unverified"
     accepted_for_alerts = False
 
-    def __init__(self, settings: Settings, query_builder=None):
+    def __init__(self, settings: Settings, query_builder=None, browser_session=None):
         self.settings = settings
         self._query_builder = query_builder or self._default_query_builder
+        self._browser_session = browser_session or PlaywrightBrowserSession(settings)
 
     def _default_query_builder(self, slot: WatchSlot) -> str:
-        # Kept only for the legacy runtime until the accepted browser-side query
-        # builder replaces it.  fast-flights is not trusted as a price parser.
+        # fast-flights remains URL-builder-only during the migration. Its parser
+        # is not trusted as a price source and will be removed after the accepted
+        # browser provider owns dynamic query construction.
         try:
             from fast_flights import FlightQuery, Passengers, create_query
         except ImportError as exc:
@@ -98,29 +102,8 @@ class GoogleFlightsPlaywrightProvider:
     def build_search_url(self, slot: WatchSlot) -> str:
         return self._query_builder(slot)
 
-    async def _setup(self):
-        playwright = await async_playwright().start()
-        browser: Browser = await playwright.chromium.launch(
-            headless=self.settings.browser_headless,
-            args=["--disable-dev-shm-usage"],
-        )
-        context: BrowserContext = await browser.new_context(
-            locale="en-US",
-            timezone_id=self.settings.timezone,
-            viewport={"width": 1365, "height": 900},
-        )
-        if self.settings.browser_block_assets:
-
-            async def route_handler(route):
-                if route.request.resource_type in {"image", "media", "font"}:
-                    await route.abort()
-                else:
-                    await route.continue_()
-
-            await context.route("**/*", route_handler)
-        page = await context.new_page()
-        page.set_default_timeout(self.settings.browser_timeout_ms)
-        return playwright, browser, context, page
+    async def close(self) -> None:
+        await self._browser_session.close()
 
     async def _check_captcha(self, page: Page) -> None:
         url = page.url.lower()
@@ -131,11 +114,10 @@ class GoogleFlightsPlaywrightProvider:
             raise CaptchaDetectedError("Google reCAPTCHA detected")
 
     async def _wait_results(self, page: Page) -> None:
-        deadline_ms = self.settings.browser_timeout_ms
         try:
             await page.get_by_text(
                 re.compile(r"Departing flights|출발 항공편|Top departing flights|인기 출발 항공편", re.I)
-            ).first.wait_for(state="visible", timeout=deadline_ms)
+            ).first.wait_for(state="visible", timeout=self.settings.browser_timeout_ms)
         except PlaywrightTimeoutError as exc:
             body = (await page.locator("body").inner_text())[:1500]
             if "price unavailable" in body.lower() or "가격 정보를 이용할 수" in body:
@@ -153,30 +135,51 @@ class GoogleFlightsPlaywrightProvider:
             try:
                 for index in range(await locator.count()):
                     item = locator.nth(index)
-                    if await item.is_visible():
-                        await item.click(timeout=4000)
-                        await page.wait_for_timeout(900)
-                        return
+                    if not await item.is_visible():
+                        continue
+                    await item.click(timeout=4000)
+                    for _ in range(40):
+                        try:
+                            selected = await item.evaluate(
+                                """el => {
+                                    const host = el.closest('[role="tab"], button, [role="button"]') || el;
+                                    return host.getAttribute('aria-selected') === 'true' ||
+                                           host.getAttribute('aria-pressed') === 'true';
+                                }"""
+                            )
+                        except Exception:
+                            selected = False
+                        if selected:
+                            return
+                        await page.wait_for_timeout(50)
             except Exception:
                 continue
+        raise ProviderError("Google Flights Cheapest/최저가 tab could not be selected")
 
-    async def _row_text_for_price_element(self, item: Locator) -> str:
+    async def _row_text_for_price_element(self, item: Locator, slot: WatchSlot) -> str:
         try:
             return str(
                 await item.evaluate(
-                    """el => {
+                    r"""(el, route) => {
                         let node = el;
+                        const forwardToken = `${route.origin}-${route.destination}`.toUpperCase();
+                        const reverseToken = `${route.destination}-${route.origin}`.toUpperCase();
                         for (let depth = 0; depth < 14 && node; depth += 1, node = node.parentElement) {
                             const text = (node.innerText || node.textContent || '').trim();
                             if (!text || text.length > 1800) continue;
-                            const normalized = text.replace(/[–—]/g, '-').replace(/\s+/g, ' ').toUpperCase();
+                            const normalized = text.replace(/[–—‑−]/g, '-').replace(/\s+/g, ' ').toUpperCase();
                             const times = text.match(/\b\d{1,2}:\d{2}(?:\s?[AP]M)?\b/gi) || [];
-                            const routeCount = normalized.split('CJJ-TPE').length - 1;
+                            const forwardCount = normalized.split(forwardToken).length - 1;
+                            const reverseCount = normalized.split(reverseToken).length - 1;
                             const shape = /nonstop|stops?|직항|경유|\bhr\b|시간/i.test(text);
-                            if (times.length >= 2 && times.length <= 4 && routeCount <= 1 && shape) return text;
+                            const broad = /flight search|search results|all filters|top departing flights|other departing flights/i.test(text);
+                            if (!broad && times.length >= 2 && times.length <= 4 && forwardCount === 1 && reverseCount === 0 && shape) {
+                                return text;
+                            }
                         }
                         return '';
-                    }"""
+                    }""",
+                    {"origin": slot.origin.upper(), "destination": slot.destination.upper()},
                 )
             )
         except Exception:
@@ -195,7 +198,7 @@ class GoogleFlightsPlaywrightProvider:
             values = parse_krw_prices(label)
             if not values:
                 continue
-            row_text = (await self._row_text_for_price_element(item)).strip()
+            row_text = (await self._row_text_for_price_element(item, slot)).strip()
             if not flight_card_is_specific(row_text, slot.origin, slot.destination):
                 continue
             for price in values:
@@ -213,7 +216,7 @@ class GoogleFlightsPlaywrightProvider:
             values = parse_krw_prices(own)
             if not values:
                 continue
-            row_text = (await self._row_text_for_price_element(item)).strip()
+            row_text = (await self._row_text_for_price_element(item, slot)).strip()
             if not flight_card_is_specific(row_text, slot.origin, slot.destination):
                 continue
             for price in values:
@@ -283,9 +286,9 @@ class GoogleFlightsPlaywrightProvider:
             pass
 
     async def search(self, slot: WatchSlot, *, verify_below_price: int | None = None) -> FlightOffer:
-        playwright = browser = context = page = None
+        page: Page | None = None
         try:
-            playwright, browser, context, page = await self._setup()
+            page = await self._browser_session.new_page()
             await page.goto(self.build_search_url(slot), wait_until="domcontentloaded")
             await self._check_captcha(page)
             await self._wait_results(page)
@@ -293,10 +296,6 @@ class GoogleFlightsPlaywrightProvider:
             await self._debug_screenshot(page, f"slot-{slot.id}-results.png")
 
             verification_requested = verify_below_price is not None and best["price"] <= verify_below_price
-            # Fail closed.  Google Booking options are not the project's
-            # verification boundary; an external seller checkout/final total is.
-            verified = False
-
             return FlightOffer(
                 provider=self.name,
                 origin=slot.origin,
@@ -304,8 +303,11 @@ class GoogleFlightsPlaywrightProvider:
                 depart_date=slot.depart_date,
                 return_date=slot.return_date,
                 total_price=best["price"],
+                observed_price_value=best["price"],
                 currency=self.settings.google_currency,
-                price_verified=verified,
+                price_verified=False,
+                verified_checkout_price=None,
+                verification_status="external_checkout_not_implemented",
                 airline=best["airline"],
                 outbound_flight=best["flight_numbers"],
                 carry_on="정보 확인 불가",
@@ -335,10 +337,7 @@ class GoogleFlightsPlaywrightProvider:
             raise ProviderError(f"Playwright Google Flights search failed: {exc}") from exc
         finally:
             if page:
-                await page.close()
-            if context:
-                await context.close()
-            if browser:
-                await browser.close()
-            if playwright:
-                await playwright.stop()
+                try:
+                    await page.close()
+                except Exception:
+                    pass
