@@ -32,6 +32,7 @@ jobs:
           bash -n install.sh
           cp .env.example .env
           mkdir -p data
+          chmod a+rwx data
           printf 'persist-me\n' > data/.ci-persistence-marker
           docker compose config >/tmp/compose-config.yml
           grep -q '/data' /tmp/compose-config.yml
