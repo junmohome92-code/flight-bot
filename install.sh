@@ -31,6 +31,6 @@ docker compose ps
 
 echo
 echo "Installation/start complete."
-echo "Health: http://127.0.0.1:${HTTP_PORT:-8080}/health"
+echo "Health: http://127.0.0.1:8080/health (or your HTTP_PORT)"
 echo "Logs  : docker compose logs -f flight-bot"
 echo "Config: edit .env, then run: docker compose up -d --build"
