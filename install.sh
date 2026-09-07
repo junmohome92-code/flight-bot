@@ -22,8 +22,12 @@ fi
 
 echo "[3/6] Preparing persistent data directory..."
 # Compose bind-mounts this host directory to /data in the container.
-# Never delete or recreate an existing database during install/update.
+# Never delete, truncate, or recreate an existing database during install/update.
 mkdir -p data
+# The image intentionally runs as non-root UID 10001. A bind mount hides the
+# image's /data ownership, so make only the directory writable for first boot.
+# Existing database file permissions/content are left untouched.
+chmod a+rwx data
 
 echo "[4/6] Validating compose configuration..."
 docker compose config >/dev/null
