@@ -168,7 +168,7 @@ TELEGRAM_ALLOWED_CHAT_IDS=...
 bash install.sh
 ```
 
-`install.sh`가 Docker/Compose 확인 → compose 검증 → 이미지 build → 컨테이너 실행까지 수행합니다. IATA 카탈로그도 Docker 이미지 안에 함께 설치되므로 별도 파일 다운로드가 필요 없습니다.
+`install.sh`가 Docker/Compose 확인 → `.env`/`data/` 준비 → compose 검증 → 이미지 build → 컨테이너 실행까지 수행합니다. 기존 `data/flight_bot.db`는 삭제·초기화하지 않습니다. IATA 카탈로그도 Docker 이미지 안에 함께 설치되므로 별도 파일 다운로드가 필요 없습니다.
 
 직접 실행하려면:
 
@@ -184,7 +184,24 @@ docker compose logs -f flight-bot
 curl http://127.0.0.1:8080/health
 ```
 
-SQLite 데이터는 Compose named volume `flight_bot_data`에 저장되어 이미지 rebuild 후에도 유지됩니다.
+### SQLite DB 보존 방식
+
+Compose는 Docker named volume이 아니라 **호스트 bind mount**를 사용합니다.
+
+```yaml
+volumes:
+  - ./data:/data
+```
+
+컨테이너 안의 DB 경로는 `/data/flight_bot.db`, 호스트에서는 `<repo>/data/flight_bot.db`입니다. 홈서버 repo가 `/data/flight-bot`이라면 실제 DB는:
+
+```text
+/data/flight-bot/data/flight_bot.db
+```
+
+`docker compose up -d --build`, 컨테이너 recreate, 이미지 rebuild를 해도 이 호스트 파일은 그대로 유지됩니다. **운영 중 `data/` 또는 `data/flight_bot.db`를 삭제하지 마십시오.**
+
+이전 named-volume 배포에서 업그레이드하는 경우 기존 named volume 자체는 자동 삭제되지 않지만, bind mount로 전환하기 전에 DB를 `./data/flight_bot.db`로 옮겨야 기존 데이터가 이어집니다. 현재 홈서버는 이미 bind mount 경로로 전환되어 있습니다.
 
 ## 주요 설정
 
@@ -244,7 +261,7 @@ python -m compileall -q src scripts tests
 docker build -t flight-bot:test .
 ```
 
-CI는 전체 단위/통합 테스트, 실제 IATA/도시 검색 계약, FastAPI 엔드포인트, Telegram 요약 버튼, 브라우저 자동화 의존성 부재, Docker build, 실제 컨테이너 `/health`를 검증합니다.
+CI는 전체 단위/통합 테스트, 실제 IATA/도시 검색 계약, FastAPI 엔드포인트, Telegram 요약 버튼, 브라우저 자동화 의존성 부재, Docker build, **실제 Compose 기동 + `/health` + bind-mounted SQLite 파일 보존**을 검증합니다.
 
 ## 운영 경계
 

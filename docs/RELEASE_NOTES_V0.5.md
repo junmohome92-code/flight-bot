@@ -4,7 +4,7 @@ Date: 2026-09-07
 
 ## Summary
 
-v0.5.0 keeps the production runtime fully browserless and extends the Naver Flights SSE implementation with safer location input, multi-airport city search, and a cleaner Telegram daily-report experience.
+v0.5.0 keeps the production runtime fully browserless and extends the Naver Flights SSE implementation with safer location input, multi-airport city search, a cleaner Telegram daily-report experience, and an explicit host-mounted SQLite persistence contract.
 
 ## User-facing changes
 
@@ -53,16 +53,20 @@ v0.5.0 keeps the production runtime fully browserless and extends the Naver Flig
 - Example resolved route: ICN → NRT / NRT → ICN
 - Result: PASS
 
-## Deployment
+## Deployment / persistence
 
 - Python 3.12 slim Docker runtime
 - `bash install.sh` remains the recommended install/update path
 - IATA catalogue is installed inside the image; no separate airport-data download is required
-- SQLite remains persisted through the configured Docker volume
+- SQLite persistence uses host bind mount `./data:/data`
+- Container DB path: `/data/flight_bot.db`
+- Current home-server DB path: `/data/flight-bot/data/flight_bot.db`
+- `docker compose up -d --build` preserves the DB across image rebuild/container recreation
+- `install.sh` prepares the host data directory for the non-root container without deleting or recreating an existing DB
 
 ## CI gate
 
-Validated by the normal repository CI after the temporary live-city workflow was removed:
+Validated by the repository CI contract:
 
 - full pytest suite
 - source/script compile
@@ -73,7 +77,8 @@ Validated by the normal repository CI after the temporary live-city workflow was
 - install/Compose validation
 - browserless policy checks
 - Docker image build
-- actual container startup and `/health` check
+- actual Compose startup and `/health` check
+- bind-mounted SQLite creation and persistence after Compose teardown
 
 ## Known boundaries
 

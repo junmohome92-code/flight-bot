@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main, "poc/**", "feat/**"]
+    branches: [main, "poc/**", "feat/**", "fix/**"]
   pull_request:
   workflow_dispatch:
 
@@ -31,7 +31,12 @@ jobs:
           set -euo pipefail
           bash -n install.sh
           cp .env.example .env
-          docker compose config >/dev/null
+          mkdir -p data
+          chmod a+rwx data
+          printf 'persist-me\n' > data/.ci-persistence-marker
+          docker compose config >/tmp/compose-config.yml
+          grep -q '/data' /tmp/compose-config.yml
+          grep -q 'flight_bot.db' /tmp/compose-config.yml
       - name: Enforce browserless production runtime
         shell: bash
         run: |
@@ -44,14 +49,14 @@ jobs:
           ! grep -RniE 'chromium|msedge|browser_headless|browser_profile|browser_debug' src Dockerfile pyproject.toml compose.yaml .env.example
       - name: Build lightweight Docker image
         run: docker build --pull -t flight-bot:ci .
-      - name: Start Docker runtime and verify health
+      - name: Start Compose runtime and verify health plus DB persistence
         shell: bash
         run: |
           set -euo pipefail
-          docker run -d --name flight-bot-ci -p 127.0.0.1:18080:8080 flight-bot:ci
-          trap 'docker logs flight-bot-ci || true; docker rm -f flight-bot-ci >/dev/null 2>&1 || true' EXIT
+          trap 'docker compose logs flight-bot || true; docker compose down >/dev/null 2>&1 || true' EXIT
+          docker compose up -d --build
           for i in {1..30}; do
-            if curl --fail --silent http://127.0.0.1:18080/health > /tmp/health.json; then
+            if curl --fail --silent http://127.0.0.1:8080/health > /tmp/health.json; then
               cat /tmp/health.json
               grep -q '"version":"0.5.0"' /tmp/health.json
               grep -q '"provider":"naver-flights-sse"' /tmp/health.json
@@ -61,11 +66,17 @@ jobs:
               grep -q '"city_search_enabled":true' /tmp/health.json
               grep -q '"iata_validation_enabled":true' /tmp/health.json
               grep -q '"daily_summary_mode":"one-message-per-user"' /tmp/health.json
+              test -f data/.ci-persistence-marker
+              test -f data/flight_bot.db
+              docker compose down
+              test -f data/.ci-persistence-marker
+              test -f data/flight_bot.db
+              trap - EXIT
               exit 0
             fi
             sleep 1
           done
-          echo 'container health endpoint did not become ready' >&2
+          echo 'compose health endpoint did not become ready' >&2
           exit 1
 
   test-windows-harness:
