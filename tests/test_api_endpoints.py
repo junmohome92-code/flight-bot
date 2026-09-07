@@ -43,12 +43,15 @@ def test_http_endpoints_end_to_end(tmp_path, monkeypatch):
         assert health.status_code == 200
         body = health.json()
         assert body["ok"] is True
-        assert body["version"] == "0.4.0"
+        assert body["version"] == "0.5.0"
         assert body["provider"] == "naver-flights-sse"
         assert body["browser_required"] is False
         assert body["slots_max"] == 20
         assert body["slots_design_capacity"] == 20
         assert body["ad_hoc_search_enabled"] is True
+        assert body["city_search_enabled"] is True
+        assert body["iata_validation_enabled"] is True
+        assert body["daily_summary_mode"] == "one-message-per-user"
 
         unauthorized = client.post("/admin/check-all")
         assert unauthorized.status_code == 401
@@ -67,6 +70,19 @@ def test_http_endpoints_end_to_end(tmp_path, monkeypatch):
         assert search.json()["persisted"] is False
         assert "SEARCH CJJ->TPE" in search.json()["result"]
 
+        city_search = client.post(
+            "/admin/search",
+            params={
+                "origin": "SEL",
+                "destination": "TYO",
+                "depart_date": "2026-09-22",
+                "return_date": "2026-09-24",
+            },
+            headers=headers,
+        )
+        assert city_search.status_code == 200
+        assert "SEARCH SEL->TYO" in city_search.json()["result"]
+
         check_all = client.post("/admin/check-all", headers=headers)
         assert check_all.status_code == 200
         assert check_all.json()["mode"] == "target-check-all"
@@ -74,6 +90,7 @@ def test_http_endpoints_end_to_end(tmp_path, monkeypatch):
         daily_all = client.post("/admin/daily-summary", headers=headers)
         assert daily_all.status_code == 200
         assert daily_all.json()["mode"] == "daily-summary-all"
+        assert daily_all.json()["summary_mode"] == "one-message-per-user"
         assert daily_all.json()["target_alerts"] is False
 
         check_slot = client.post("/admin/check-slot/7", headers=headers)
