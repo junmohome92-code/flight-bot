@@ -25,8 +25,29 @@
 - Telegram daily summary: per-slot `상세` buttons trigger fresh TOP 5 search
 - Target alert: one-shot latch remains independent from the daily summary
 - Paused slots: excluded from scheduled scans and daily summary
-- Docker: browserless Python 3.12 slim runtime with SQLite persistent volume
+- Docker: browserless Python 3.12 slim runtime
+- SQLite persistence: **host bind mount `./data:/data`**
+- Production DB path on home server: `/data/flight-bot/data/flight_bot.db`
 - Installer: `bash install.sh`
+
+## Persistence invariant
+
+The SQLite database is part of production state and must never be deleted or reinitialized during code updates.
+
+Required deployment contract:
+
+```yaml
+volumes:
+  - ./data:/data
+```
+
+- Container path: `/data/flight_bot.db`
+- Repository-relative host path: `./data/flight_bot.db`
+- Home-server path: `/data/flight-bot/data/flight_bot.db`
+- `docker compose up -d --build` must preserve the existing host DB across image rebuild/container recreation.
+- `install.sh` may create the `data/` directory but must not delete, truncate, replace, or recreate an existing DB.
+- The Docker image runs as non-root UID `10001`; installer/CI must ensure the bind directory is writable without mutating existing DB contents.
+- Legacy Docker named volumes are no longer the production persistence contract.
 
 ## Live validation evidence — 2026-09-07
 
@@ -67,9 +88,10 @@ Before merging to `main`, require success for:
 - install/Compose validation
 - browserless dependency policy
 - Docker image build
-- actual container startup and `/health` verification
+- actual `docker compose up -d --build` startup and `/health` verification
+- bind-mounted SQLite creation/persistence verification before and after Compose teardown
 
-Final branch CI after removing the temporary live workflow passed both Linux and Windows jobs on 2026-09-07.
+Baseline `main` CI for commit `26ddbad71e7a328c180a25e2e089b3bd158cdbec` passed both Linux and Windows jobs on 2026-09-07.
 
 ## Runtime boundaries
 
