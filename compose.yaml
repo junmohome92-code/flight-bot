@@ -13,11 +13,11 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      - flight_bot_data:/data
+      # Host bind mount by design: rebuilding/recreating the container must not
+      # move or replace the SQLite database. On the home server this resolves to
+      # /data/flight-bot/data/flight_bot.db.
+      - ./data:/data
     # Safe default: expose only on host loopback. Put an authenticated reverse
     # proxy in front only if a webhook endpoint must be public.
     ports:
       - "127.0.0.1:${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"
-
-volumes:
-  flight_bot_data:
