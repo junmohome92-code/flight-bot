@@ -23,6 +23,11 @@ class WatchSlot:
     checked_bag: int
     enabled: bool
     target_price: int
+    # Naver distinguishes airport codes such as ICN from metropolitan city
+    # codes such as SEL. Existing databases default to airport for backward
+    # compatibility; new city selections persist the type explicitly.
+    origin_type: str = "airport"
+    destination_type: str = "airport"
     alert_state: str = ALERT_ARMED
     last_observed_price: int | None = None
     lowest_observed_price: int | None = None
