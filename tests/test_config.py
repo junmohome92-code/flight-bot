@@ -9,9 +9,9 @@ def test_default_search_cadence_naver_policy_and_slot_policy():
     assert settings.search_interval_hours == 2
     assert settings.scheduled_search_hours == list(range(0, 24, 2))
     assert settings.daily_summary_hour == 8
-    assert settings.slot_active_limit == 10
-    assert CURRENT_SLOT_LIMIT == 10
-    assert SLOT_DESIGN_CAPACITY == 10
+    assert settings.slot_active_limit == 20
+    assert CURRENT_SLOT_LIMIT == 20
+    assert SLOT_DESIGN_CAPACITY == 20
     assert settings.naver_api_url.endswith("/flight/international/searchFlights")
     assert settings.naver_api_timeout_seconds == 30
     assert settings.naver_api_attempts == 3
@@ -21,11 +21,11 @@ def test_default_search_cadence_naver_policy_and_slot_policy():
     assert settings.require_verified_alerts is False
 
 
-def test_runtime_slot_limit_can_be_lowered_but_not_exceed_ten():
+def test_runtime_slot_limit_can_be_lowered_but_not_exceed_twenty():
     assert Settings(_env_file=None, slot_active_limit=5).slot_active_limit == 5
-    assert Settings(_env_file=None, slot_active_limit=10).slot_active_limit == 10
+    assert Settings(_env_file=None, slot_active_limit=20).slot_active_limit == 20
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, slot_active_limit=11)
+        Settings(_env_file=None, slot_active_limit=21)
 
 
 def test_naver_runtime_limits_are_validated():
