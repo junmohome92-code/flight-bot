@@ -28,6 +28,30 @@ Flight Bot v0.5 uses **Naver Flights SSE as the sole production price source**. 
 - Docker-first deployment with `bash install.sh`
 - FastAPI health/admin endpoints, including ad-hoc `/admin/search`
 
+## Production persistence — do not regress
+
+Production Compose persistence is a **host bind mount**, not a Docker named volume:
+
+```yaml
+volumes:
+  - ./data:/data
+```
+
+The application still uses `/data/flight_bot.db` inside the container. On the current home server repository at `/data/flight-bot`, the real DB is:
+
+```text
+/data/flight-bot/data/flight_bot.db
+```
+
+Hard rules for future work:
+
+- Never delete, truncate, reset, replace, or recreate this DB as part of a code update.
+- Keep `docker compose up -d --build` as a safe redeploy path.
+- `install.sh` may prepare `data/` permissions for the non-root container but must leave existing DB contents untouched.
+- CI must validate actual Compose startup, `/health`, and host SQLite persistence.
+- Do not switch back to `flight_bot_data:/data` unless an explicit migration plan is approved.
+- A legacy named volume may still exist on older installations; switching persistence paths does not itself copy that DB into `./data`.
+
 ## Confirmed live SSE results — 2026-09-07
 
 Airport search:
@@ -67,9 +91,10 @@ Before merging feature work to `main`, require green CI for:
 - install/Compose validation
 - browserless runtime policy
 - Docker build
-- live container `/health`
+- actual Compose container `/health`
+- bind-mounted SQLite persistence
 
-The temporary workflow used for the one-time live `SEL <-> TYO` probe was removed after PASS. The normal branch CI subsequently passed Linux and Windows.
+Baseline `main` commit before the persistence patch: `26ddbad71e7a328c180a25e2e089b3bd158cdbec`. Its normal CI passed Linux and Windows on 2026-09-07.
 
 ## Version / docs
 
