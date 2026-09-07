@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from flight_bot.naver_api import build_result_url, query_round_trip  # noqa: E402
+from flight_bot.naver_search import build_result_url, query_round_trip  # noqa: E402
 
 
 DEFAULT_ORIGIN = "CJJ"
@@ -96,6 +96,8 @@ def _print_rows(result: ProbeResult, max_rows: int = 5) -> None:
     print("\n=== NAVER RESULT ===")
     print("POC_STATUS=PASS")
     print("source=NAVER_SSE_API")
+    print(f"origin_type={result.diagnostics.get('origin_type')}")
+    print(f"destination_type={result.diagnostics.get('destination_type')}")
     print(f"direct_candidate_count={len(result.rows)}")
     print(f"lowest_direct_price={int(result.rows[0]['price']):,} KRW")
     advertised = result.diagnostics.get("advertised_lowest_direct")
@@ -104,8 +106,12 @@ def _print_rows(result: ProbeResult, max_rows: int = 5) -> None:
 
     for index, row in enumerate(result.rows[:max_rows], start=1):
         times = row.get("times") or []
-        out_times = " -> ".join(times[:2]) if len(times) >= 2 else "time-unavailable"
-        ret_times = " -> ".join(times[2:4]) if len(times) >= 4 else "time-unavailable"
+        out_dep = row.get("outbound_departure_airport") or "?"
+        out_arr = row.get("outbound_arrival_airport") or "?"
+        ret_dep = row.get("return_departure_airport") or "?"
+        ret_arr = row.get("return_arrival_airport") or "?"
+        out_times = f"{out_dep} {times[0]} -> {out_arr} {times[1]}" if len(times) >= 2 else "time-unavailable"
+        ret_times = f"{ret_dep} {times[2]} -> {ret_arr} {times[3]}" if len(times) >= 4 else "time-unavailable"
         print(f"candidate_{index}={int(row['price']):,} KRW")
         print(
             f"  outbound={row.get('outbound_airline')} {row.get('outbound_flight')} | {out_times}"
@@ -150,7 +156,7 @@ async def run(args: argparse.Namespace) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Naver Flights SSE API POC")
+    parser = argparse.ArgumentParser(description="Naver Flights SSE API POC (airport or supported city code)")
     parser.add_argument("--origin", default=DEFAULT_ORIGIN)
     parser.add_argument("--destination", default=DEFAULT_DESTINATION)
     parser.add_argument("--depart", default=DEFAULT_DEPART)
