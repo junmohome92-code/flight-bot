@@ -92,7 +92,9 @@ async def test_manual_daily_summary_does_not_consume_target_latch(tmp_path):
     await service.check_all(notify_target=False, notify_daily_summary=True)
 
     assert len(notifier.messages) == 1
-    assert notifier.messages[0].startswith("📊 정기 가격 알림")
+    assert notifier.messages[0].startswith("📊 ")
+    assert "항공권 정기 보고" in notifier.messages[0]
+    assert "#1 CJJ→TPE" in notifier.messages[0]
     assert db.get_slot(1).alert_state == "ARMED"
 
     await service.check_all(notify_target=True, notify_daily_summary=False)

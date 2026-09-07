@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
         await service.close()
 
 
-app = FastAPI(title="Flight Bot", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="Flight Bot", version="0.5.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -80,7 +80,7 @@ async def health():
     discord_ready = bool(notifier.discord_client and notifier.discord_client.is_ready())
     return {
         "ok": True,
-        "version": "0.4.0",
+        "version": "0.5.0",
         "provider": service.provider.name,
         "provider_accepted_for_alerts": bool(getattr(service.provider, "accepted_for_alerts", True)),
         "provider_transport": "naver_sse_api",
@@ -88,6 +88,7 @@ async def health():
         "require_verified_alerts": settings.require_verified_alerts,
         "search_interval_hours": settings.search_interval_hours,
         "daily_summary_hour": settings.daily_summary_hour,
+        "daily_summary_mode": "one-message-per-user",
         "alert_max_offers": settings.alert_max_offers,
         "telegram_connected": notifier.telegram_app is not None,
         "discord_connected": discord_ready,
@@ -98,6 +99,8 @@ async def health():
         "slots_max": settings.slot_active_limit,
         "slots_design_capacity": SLOT_DESIGN_CAPACITY,
         "ad_hoc_search_enabled": True,
+        "city_search_enabled": True,
+        "iata_validation_enabled": True,
     }
 
 
@@ -154,7 +157,12 @@ async def daily_summary(x_flight_bot_secret: str | None = Header(default=None)):
     if service.scan_active:
         return {"accepted": False, "reason": "scan already active"}
     asyncio.create_task(service.check_all(notify_target=False, notify_daily_summary=True))
-    return {"accepted": True, "mode": "daily-summary-all", "target_alerts": False}
+    return {
+        "accepted": True,
+        "mode": "daily-summary-all",
+        "summary_mode": "one-message-per-user",
+        "target_alerts": False,
+    }
 
 
 @app.post("/admin/check-slot/{slot_id}")
@@ -172,7 +180,13 @@ async def daily_summary_slot(slot_id: int, x_flight_bot_secret: str | None = Hea
     if service.scan_active:
         return {"accepted": False, "reason": "all-slot scan already active"}
     result = await service.check_slot(slot_id, notify_target=False, notify_daily_summary=True)
-    return {"accepted": True, "mode": "daily-summary-slot", "slot_id": slot_id, "target_alerts": False, "result": result}
+    return {
+        "accepted": True,
+        "mode": "daily-summary-slot",
+        "slot_id": slot_id,
+        "target_alerts": False,
+        "result": result,
+    }
 
 
 def main():

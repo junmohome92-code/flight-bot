@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import inspect
 import re
-from datetime import date
+from datetime import date, datetime
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from .config import Settings
 from .db import Database, StaleSlotError
+from .locations import display_location, resolve_code_token, suggest_locations
 from .models import ALERT_ARMED, ALERT_SENDING, ALERTED, FlightOffer, WatchSlot
 from .providers import NaverFlightsSSEProvider, ProviderError
 
@@ -17,10 +19,17 @@ HELP = """✈️ 항공권 감시봇 도움말
 버튼 메뉴에서 다음 기능을 사용할 수 있습니다.
 • ➕ 감시 등록: 최대 20개 슬롯
 • 🔎 바로 검색: 슬롯 등록 없이 1회 검색
-• 📋 내 슬롯: 슬롯별 즉시 검색/목표가/일시정지/삭제
+• 📋 내 슬롯: 슬롯별 지금 검색(즉시 검색)/목표가/일시정지/삭제
+
+공항 입력은 코드뿐 아니라 이름도 지원합니다.
+예: 청주, 인천, 도쿄, 서울, CJJ, TYO
+도쿄/서울/오사카처럼 공항이 여러 개인 도시는
+'도시 전체' 또는 개별 공항을 버튼으로 선택할 수 있습니다.
+잘못된 IATA 코드는 저장하지 않고 비슷한 실제 공항을 추천합니다.
 
 명령어도 계속 지원합니다.
 /flight search CJJ TPE 2026-09-18 2026-09-20
+/flight search SEL TYO 2026-09-22 2026-09-24
 /flight add CJJ TPE 2026-09-18 2026-09-20 350000
 /flight list
 /flight check 1
@@ -34,9 +43,12 @@ HELP = """✈️ 항공권 감시봇 도움말
 가격 소스: Naver Flights SSE API
 조회 결과: 가격순 최대 TOP 5 왕복 조합
 정기 검색: 기본 2시간 주기
+아침 정기 보고: 사용자당 요약 메시지 1개
 목표가 도달 알림: 목표가 설정당 최초 1회
 """
 
+# Kept for backward-compatible tests and basic syntax checks. Actual save/search
+# validation additionally checks the bundled real IATA catalogue.
 _AIRPORT_RE = re.compile(r"^[A-Z]{3}$")
 
 
@@ -61,7 +73,8 @@ class FlightService:
         state = "ON" if slot.enabled else "PAUSED"
         observed = f" / 최근 {slot.last_observed_price:,}{slot.currency}" if slot.last_observed_price else ""
         return (
-            f"#{slot.id} [{state}/{slot.alert_state}] {slot.origin}→{slot.destination} "
+            f"#{slot.id} [{state}/{slot.alert_state}] "
+            f"{display_location(slot.origin)}→{display_location(slot.destination)} "
             f"{slot.depart_date}~{slot.return_date} / 직항 왕복 / 목표 {slot.target_price:,}{slot.currency}{observed}"
         )
 
@@ -117,8 +130,22 @@ class FlightService:
             if isinstance(times, list) and len(times) >= 4:
                 out_label = " ".join(value for value in (out_airline, out_flight) if value) or "가는편"
                 ret_label = " ".join(value for value in (ret_airline, ret_flight) if value) or "오는편"
-                price_lines.append(f"   가는편: {out_label} · {times[0]} → {times[1]}")
-                price_lines.append(f"   오는편: {ret_label} · {times[2]} → {times[3]}")
+                out_dep = str(row.get("outbound_departure_airport") or "").strip()
+                out_arr = str(row.get("outbound_arrival_airport") or "").strip()
+                ret_dep = str(row.get("return_departure_airport") or "").strip()
+                ret_arr = str(row.get("return_arrival_airport") or "").strip()
+                out_times = (
+                    f"{out_dep} {times[0]} → {out_arr} {times[1]}"
+                    if out_dep and out_arr
+                    else f"{times[0]} → {times[1]}"
+                )
+                ret_times = (
+                    f"{ret_dep} {times[2]} → {ret_arr} {times[3]}"
+                    if ret_dep and ret_arr
+                    else f"{times[2]} → {times[3]}"
+                )
+                price_lines.append(f"   가는편: {out_label} · {out_times}")
+                price_lines.append(f"   오는편: {ret_label} · {ret_times}")
             else:
                 details = " / ".join(value for value in (out_airline, out_flight, ret_airline, ret_flight) if value)
                 if details:
@@ -130,7 +157,7 @@ class FlightService:
         result_url = offer.result_url or offer.booking_url or "링크 확인 불가"
         target_line = f"\n목표가: {slot.target_price:,}{slot.currency}" if include_target else ""
         return (
-            f"✈️ {slot.origin} → {slot.destination} 왕복\n"
+            f"✈️ {display_location(slot.origin)} → {display_location(slot.destination)} 왕복\n"
             f"{slot.depart_date} ~ {slot.return_date}\n"
             f"Naver Flights 직항 왕복가 TOP {min(self.settings.alert_max_offers, len(rows))}\n"
             + "\n".join(price_lines)
@@ -151,11 +178,25 @@ class FlightService:
     def _valid_airport(value: str) -> bool:
         return bool(_AIRPORT_RE.fullmatch((value or "").strip().upper()))
 
+    @staticmethod
+    def _unknown_location_message(value: str) -> str:
+        suggestions = suggest_locations(value, limit=4)
+        if suggestions:
+            labels = ", ".join(f"{option.name} {option.code}" for option in suggestions)
+            return f"'{value}' IATA 위치 코드를 찾을 수 없습니다. 비슷한 실제 공항/도시: {labels}"
+        return f"'{value}' IATA 위치 코드를 찾을 수 없습니다. 실제 IATA 공항/도시 코드를 확인해 주세요."
+
     def validate_trip(self, origin: str, destination: str, depart_date: str, return_date: str) -> str | None:
         origin = origin.strip().upper()
         destination = destination.strip().upper()
-        if not (self._valid_airport(origin) and self._valid_airport(destination)):
-            return "공항 코드는 영문 3자리 IATA 코드로 입력해 주세요. 예: CJJ TPE"
+        if not self._valid_airport(origin):
+            return self._unknown_location_message(origin)
+        if not self._valid_airport(destination):
+            return self._unknown_location_message(destination)
+        if resolve_code_token(origin) is None:
+            return self._unknown_location_message(origin)
+        if resolve_code_token(destination) is None:
+            return self._unknown_location_message(destination)
         if origin == destination:
             return "출발지와 도착지는 서로 달라야 합니다."
         if not (self._valid_date(depart_date) and self._valid_date(return_date)):
@@ -338,6 +379,8 @@ class FlightService:
                     + "\n알림은 전송됐지만 상태 저장을 확인하지 못했습니다. 중복 방지를 위해 SENDING 상태를 유지합니다."
                 )
 
+        # Kept for the explicit per-slot admin endpoint. Full daily scans use
+        # the aggregate path in check_all and therefore never emit N messages.
         if notify_daily_summary and self.notifier and not target_alert_sent:
             try:
                 await self.notifier.send(
@@ -350,6 +393,57 @@ class FlightService:
 
         return self.format_offer(slot, offer)
 
+    def format_daily_summary(self, entries: list[dict]) -> str:
+        now = datetime.now(ZoneInfo(self.settings.timezone))
+        lines = [
+            f"📊 {now:%m/%d} 항공권 정기 보고",
+            f"활성 슬롯 {len(entries)}개 · 최저 왕복가 기준",
+            "",
+        ]
+        for entry in entries:
+            slot: WatchSlot = entry["slot"]
+            current = entry.get("current")
+            previous = entry.get("previous")
+            failed = bool(entry.get("failed"))
+            route = f"{slot.origin}→{slot.destination}"
+            if failed or current is None:
+                lines.append(f"#{slot.id} {route}  ⚠ 조회 실패")
+                continue
+            current = int(current)
+            if previous is None:
+                change = "신규"
+            else:
+                delta = current - int(previous)
+                if delta < 0:
+                    change = f"▼{abs(delta):,}"
+                elif delta > 0:
+                    change = f"▲{delta:,}"
+                else:
+                    change = "─"
+            target = " 🎯" if current <= slot.target_price else ""
+            lines.append(f"#{slot.id} {route}  {current:,}원  {change}{target}")
+        lines.extend(["", "아래 상세 버튼을 누르면 해당 슬롯을 즉시 다시 검색합니다."])
+        return "\n".join(lines)
+
+    async def _send_daily_summaries(self, grouped: dict[tuple[str, str], list[dict]]) -> None:
+        if not self.notifier:
+            return
+        for (platform, owner_id), entries in grouped.items():
+            if not entries:
+                continue
+            text = self.format_daily_summary(entries)
+            slot_ids = [int(entry["slot"].id) for entry in entries]
+            try:
+                send_summary = getattr(self.notifier, "send_summary", None)
+                if send_summary:
+                    await send_summary(platform, owner_id, text, slot_ids)
+                else:
+                    await self.notifier.send(platform, owner_id, text)
+            except Exception:
+                # A summary delivery failure must not abort the scheduler or
+                # prevent another owner's summary from being sent.
+                continue
+
     async def check_all(
         self,
         *,
@@ -359,13 +453,28 @@ class FlightService:
         if self._scan_active:
             return False
         self._scan_active = True
+        grouped: dict[tuple[str, str], list[dict]] = {}
         try:
             for slot in self.db.list_slots(enabled_only=True):
-                await self.check_slot(
+                previous = slot.last_observed_price
+                result = await self.check_slot(
                     slot.id,
                     notify_target=notify_target,
-                    notify_daily_summary=notify_daily_summary,
+                    # Daily all-slot reports are aggregated below.
+                    notify_daily_summary=False,
                 )
+                updated = self.db.get_slot(slot.id) or slot
+                failed = result.startswith("조회 실패:") or updated.last_observed_price is None
+                grouped.setdefault((slot.owner_platform, slot.owner_id), []).append(
+                    {
+                        "slot": updated,
+                        "previous": previous,
+                        "current": updated.last_observed_price,
+                        "failed": failed,
+                    }
+                )
+            if notify_daily_summary:
+                await self._send_daily_summaries(grouped)
             return True
         finally:
             self._scan_active = False

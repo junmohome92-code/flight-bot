@@ -1,4 +1,5 @@
 # Known-good direct dependency versions for Python 3.12.
+airportsdata==20260905
 apscheduler==3.11.3
 discord.py==2.7.1
 fastapi==0.141.1

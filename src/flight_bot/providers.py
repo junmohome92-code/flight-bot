@@ -5,8 +5,10 @@ import time
 from datetime import datetime, timezone
 
 from .config import Settings
+from .locations import location_type
 from .models import FlightOffer, WatchSlot
-from .naver_api import NaverAPIError, build_result_url, query_round_trip
+from .naver_api import NaverAPIError
+from .naver_search import build_result_url, query_round_trip
 
 
 class ProviderError(RuntimeError):
@@ -16,10 +18,8 @@ class ProviderError(RuntimeError):
 class NaverFlightsSSEProvider:
     """Production direct round-trip provider backed by Naver Flights SSE.
 
-    This provider never launches a browser and never parses DOM/CSS. It calls
-    Naver's flight search SSE endpoint, joins fareMappings to the outbound and
-    return itineraries, de-duplicates equivalent flight pairs, and exposes the
-    cheapest ranked rows to the notification layer.
+    Supports both airport codes (for example ICN) and metropolitan city codes
+    (for example SEL/TYO). It never launches a browser or parses DOM/CSS.
     """
 
     name = "naver-flights-sse"
@@ -45,6 +45,8 @@ class NaverFlightsSSEProvider:
         if not slot.return_date:
             raise ProviderError("Naver provider requires a round-trip return date")
 
+        origin_type = location_type(slot.origin)
+        destination_type = location_type(slot.destination)
         try:
             async with self._request_lock:
                 await self._respect_request_interval()
@@ -54,6 +56,8 @@ class NaverFlightsSSEProvider:
                     slot.destination,
                     slot.depart_date,
                     slot.return_date,
+                    origin_type=origin_type,
+                    destination_type=destination_type,
                     timeout_seconds=self.settings.naver_api_timeout_seconds,
                     attempts=self.settings.naver_api_attempts,
                     limit=max(20, self.settings.alert_max_offers),
@@ -75,7 +79,14 @@ class NaverFlightsSSEProvider:
             value for value in (outbound_airline, return_airline) if value
         )
         price = int(best["price"])
-        result_url = build_result_url(slot.origin, slot.destination, slot.depart_date, slot.return_date)
+        result_url = build_result_url(
+            slot.origin,
+            slot.destination,
+            slot.depart_date,
+            slot.return_date,
+            origin_type=origin_type,
+            destination_type=destination_type,
+        )
 
         return FlightOffer(
             provider=self.name,
@@ -105,6 +116,8 @@ class NaverFlightsSSEProvider:
                 "observed_price": price,
                 "round_trip": True,
                 "direct_only": True,
+                "origin_type": origin_type,
+                "destination_type": destination_type,
                 "display_offer_count": len(display),
                 "advertised_lowest_direct": diagnostics.get("advertised_lowest_direct"),
                 "sse_event_count": diagnostics.get("sse_event_count"),
