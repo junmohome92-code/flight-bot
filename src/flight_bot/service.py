@@ -8,7 +8,7 @@ from datetime import date
 from .config import Settings
 from .db import Database, StaleSlotError
 from .models import ALERT_ARMED, ALERT_SENDING, ALERTED, FlightOffer, WatchSlot
-from .providers import GoogleFlightsPlaywrightProvider, ProviderError
+from .providers import NaverFlightsSSEProvider, ProviderError
 
 
 HELP = """항공권 감시봇 명령어
@@ -23,10 +23,12 @@ HELP = """항공권 감시봇 명령어
 
 감시 슬롯은 1~10번까지 총 10개를 사용할 수 있습니다.
 pause 상태도 슬롯을 차지합니다.
-가격 검색은 2시간 주기이며 각 검색은 새 브라우저 저장공간으로 격리합니다.
-알림 후보는 Google Flights 왕복 검색의 직항만 사용하며 경유편은 제외합니다.
+가격 검색은 기본 2시간 주기입니다.
+가격 소스는 Naver Flights SSE API이며 브라우저는 사용하지 않습니다.
+검색 조건은 성인 1명 / 이코노미 / 직항 / 왕복입니다.
+조회 결과는 가격순 최대 TOP 5 왕복 조합을 보여줍니다.
 목표가 도달 알림은 목표가 설정당 최초 1회만 전송합니다.
-그 이후에는 하루 1회 정기 가격 알림에서 최신 직항 최저가 창을 보여줍니다.
+그 이후에는 하루 1회 정기 가격 알림에서 최신 직항 왕복가를 보여줍니다.
 """
 
 _AIRPORT_RE = re.compile(r"^[A-Z]{3}$")
@@ -36,7 +38,7 @@ class FlightService:
     def __init__(self, settings: Settings, db: Database, provider=None):
         self.settings = settings
         self.db = db
-        self.provider = provider or GoogleFlightsPlaywrightProvider(settings)
+        self.provider = provider or NaverFlightsSSEProvider(settings)
         self.notifier = None
         self._operation_lock = asyncio.Lock()
         self._scan_active = False
@@ -54,17 +56,10 @@ class FlightService:
         observed = f" / 최근 {slot.last_observed_price:,}{slot.currency}" if slot.last_observed_price else ""
         return (
             f"#{slot.id} [{state}/{slot.alert_state}] {slot.origin}→{slot.destination} "
-            f"{slot.depart_date}~{slot.return_date} / 직항만 / 목표 {slot.target_price:,}{slot.currency}{observed}"
+            f"{slot.depart_date}~{slot.return_date} / 직항 왕복 / 목표 {slot.target_price:,}{slot.currency}{observed}"
         )
 
     def format_offer(self, slot: WatchSlot, offer: FlightOffer) -> str:
-        """Format one result-page message with exactly one user-facing URL.
-
-        Google can expose the same physical row through both an aria-label and
-        visible text with tiny whitespace differences. De-duplicate those
-        semantically before applying the configured display limit so the daily
-        Cheapest window never wastes a slot on the same flight twice.
-        """
         raw_rows = list(offer.display_offers or [])
         rows: list[dict] = []
         seen_rows: set[tuple] = set()
@@ -73,16 +68,14 @@ class FlightService:
                 price = int(row.get("price"))
             except (TypeError, ValueError, AttributeError):
                 continue
-            airline = re.sub(r"\s+", " ", str(row.get("airline") or "").strip()).lower()
             times_value = row.get("times") or []
-            times = tuple(
-                re.sub(r"\s+", " ", str(value).strip()).lower()
-                for value in times_value
-            ) if isinstance(times_value, list) else ()
-            flight_numbers = re.sub(
-                r"\s+", "", str(row.get("flight_numbers") or "").upper()
+            times = tuple(str(value).strip() for value in times_value) if isinstance(times_value, list) else ()
+            key = (
+                price,
+                str(row.get("outbound_flight") or ""),
+                str(row.get("return_flight") or ""),
+                times,
             )
-            key = (price, airline, times, flight_numbers)
             if key in seen_rows:
                 continue
             seen_rows.add(key)
@@ -94,10 +87,11 @@ class FlightService:
             rows = [
                 {
                     "price": offer.observed_price,
-                    "airline": offer.airline,
-                    "flight_numbers": offer.outbound_flight,
+                    "outbound_airline": offer.airline,
+                    "return_airline": offer.airline,
+                    "outbound_flight": offer.outbound_flight,
+                    "return_flight": offer.inbound_flight,
                     "times": [],
-                    "nonstop": offer.nonstop,
                 }
             ]
 
@@ -107,31 +101,35 @@ class FlightService:
                 price = int(row.get("price"))
             except (TypeError, ValueError, AttributeError):
                 continue
-            details: list[str] = []
-            airline = str(row.get("airline") or "").strip()
-            if airline:
-                details.append(airline)
             times = row.get("times") or []
-            if isinstance(times, list) and len(times) >= 2:
-                details.append(f"{times[0]} → {times[1]}")
-            flight_numbers = str(row.get("flight_numbers") or "").strip()
-            if flight_numbers:
-                details.append(flight_numbers)
-            suffix = f" · {' / '.join(details)}" if details else ""
-            price_lines.append(f"{index}. {price:,}{offer.currency}{suffix}")
+            out_airline = str(row.get("outbound_airline") or row.get("outbound_airline_code") or "").strip()
+            ret_airline = str(row.get("return_airline") or row.get("return_airline_code") or "").strip()
+            out_flight = str(row.get("outbound_flight") or "").strip()
+            ret_flight = str(row.get("return_flight") or "").strip()
+
+            price_lines.append(f"{index}. {price:,}{offer.currency}")
+            if isinstance(times, list) and len(times) >= 4:
+                out_label = " ".join(value for value in (out_airline, out_flight) if value) or "가는편"
+                ret_label = " ".join(value for value in (ret_airline, ret_flight) if value) or "오는편"
+                price_lines.append(f"   가는편: {out_label} · {times[0]} → {times[1]}")
+                price_lines.append(f"   오는편: {ret_label} · {times[2]} → {times[3]}")
+            else:
+                details = " / ".join(value for value in (out_airline, out_flight, ret_airline, ret_flight) if value)
+                if details:
+                    price_lines.append(f"   {details}")
 
         if not price_lines:
             price_lines.append(f"1. {offer.observed_price:,}{offer.currency}")
 
-        result_url = offer.google_flights_url or "링크 확인 불가"
+        result_url = offer.result_url or offer.booking_url or "링크 확인 불가"
         return (
             f"✈️ {slot.origin} → {slot.destination} 왕복\n"
             f"{slot.depart_date} ~ {slot.return_date}\n"
-            f"Google Flights 직항 왕복가\n"
+            f"Naver Flights 직항 왕복가 TOP {min(self.settings.alert_max_offers, len(rows))}\n"
             + "\n".join(price_lines)
             + f"\n목표가: {slot.target_price:,}{slot.currency}"
             + f"\n위탁수하물: {offer.checked_baggage or '정보 확인 불가'}"
-            + f"\nGoogle Flights 검색결과: {result_url}"
+            + f"\nNaver Flights 검색결과: {result_url}"
         )
 
     @staticmethod
@@ -283,12 +281,6 @@ class FlightService:
         notify_target: bool = True,
         notify_daily_summary: bool = False,
     ) -> bool:
-        """Scan every enabled slot.
-
-        Scheduled operation keeps ``notify_target=True``. Admin/manual tests may
-        disable target alerts while forcing the daily summary so a user can
-        verify the regular message without consuming the one-shot target latch.
-        """
         if self._scan_active:
             return False
         self._scan_active = True

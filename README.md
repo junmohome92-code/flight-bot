@@ -1,118 +1,70 @@
-# Flight Bot — Google Flights 직항 가격 감시
+# Flight Bot — Naver Flights SSE
 
-개인 Ubuntu 홈서버에서 Docker로 실행하는 Google Flights 왕복 가격 감시봇입니다.
+네이버 항공권의 검색 응답을 이용해 **직항 왕복 가격을 감시하고 Telegram/Discord/Kakao 연동 알림을 보내는 self-hosted 봇**입니다.
 
-## 현재 제품 범위
+현재 운영 가격 소스는 **Naver Flights SSE API 하나로 확정**했습니다. 브라우저 자동화나 DOM/CSS 파싱은 사용하지 않습니다.
 
-알람은 **Google Flights 검색결과 화면에 실제 표시된 왕복 가격**을 기준으로 합니다.
-
-```text
-Google Flights 왕복 검색
-→ Cheapest/최저가
-→ 직항(Nonstop) 행만 수집
-→ 중복 제거
-→ 가격순 정렬
-→ 최저가 + 추가 직항 후보 표시
-→ Google Flights 검색결과 링크 1개 제공
-```
-
-하지 않는 것:
+## 확정된 가격 수집 방식
 
 ```text
-Booking options 진입      NO
-항공사 결제 페이지 진입   NO
-OTA/여행사 링크 제공      NO
-외부 checkout 검증        NO
+flight-api.naver.com/flight/international/searchFlights
+        ↓ POST JSON
+Accept: text/event-stream
+        ↓
+SSE 이벤트 수집
+        ↓
+itineraries + fareMappings 결합
+        ↓
+가는편/오는편 + 항공사 + 편명 + 시간 + 왕복 총액 구성
+        ↓
+동일 왕복 조합 중복 제거
+        ↓
+가격 오름차순 TOP 5
 ```
 
-## 검색 / 알림 주기
+기본 검색 조건은 다음과 같습니다.
 
-기본값:
+- 성인 1명
+- 이코노미
+- 직항
+- 왕복
+- KRW
+- 가격순 TOP 5
+
+2026-09-07 Windows 실조회에서 `CJJ → TPE → CJJ`, `2026-09-18 ~ 2026-09-20` 조건으로 HTTP `201`, `text/event-stream`, SSE 20개 이벤트를 정상 수신했고 최저 왕복가 **319,620원**을 확인했습니다. 같은 시점 네이버 항공권 화면 표시 가격과 일치했습니다.
+
+## 가격 데이터 구조
+
+한 왕복 후보는 다음 정보를 가집니다.
 
 ```text
-SEARCH_INTERVAL_HOURS=2
-DAILY_SUMMARY_HOUR=8
+왕복 총액
+가는편 항공사 / 편명 / 출발시간 / 도착시간
+오는편 항공사 / 편명 / 출발시간 / 도착시간
+판매 파트너 코드
+직항 여부
 ```
 
-- 가격 검색은 `00, 02, 04, ... 22시`처럼 2시간마다 수행합니다.
-- 오전 08시 검색은 하루 1회 **정기 가격 알림**도 전송합니다.
-- 정기 알림 때문에 별도 Google 조회를 추가하지 않습니다.
-- 각 검색은 **새 BrowserContext**를 사용하여 이전 검색의 cookie/cache/localStorage/IndexedDB 등을 다음 검색에 넘기지 않습니다.
+가는편과 오는편의 항공사가 달라도 하나의 왕복 조합으로 취급합니다.
 
-## 목표가 알림
-
-목표가 도달 알림은 **목표가 설정당 최초 1회만** 전송합니다.
+예시:
 
 ```text
-ARMED
-→ 최저 직항 왕복가 <= target
-→ SENDING
-→ ALERTED
+1. 319,620KRW
+   가는편: 이스타항공 ZE781 · 23:40 → 01:10
+   오는편: 에어로케이 RF322 · 13:15 → 16:40
 ```
 
-`ALERTED` 이후 가격이 다시 위/아래로 움직여도 자동 재무장하지 않습니다.
+## 감시/알림 동작
 
-다시 목표가 알림을 받고 싶으면:
+- 감시 슬롯: 최대 10개
+- 기본 조회 주기: 2시간
+- 목표가 도달 알림: 목표가 설정당 최초 1회
+- 일일 요약: 기본 08:00, 해당 정기 조회 결과 재사용
+- 메시지에는 가격순 최대 TOP 5 왕복 조합 표시
+- 예약/결제/외부 판매처 checkout 검증은 현재 범위 밖
 
-```text
-/flight target <슬롯번호> <새 목표가>
-```
-
-를 사용합니다.
-
-정기 알림 시각과 목표가 최초 도달이 겹치면 같은 슬롯에 메시지가 2개 오지 않도록 **목표가 도달 알림만 전송**하고 그날 정기알림은 생략합니다.
-
-## 하루 1회 정기 가격 알림
-
-항상 현재 직항 최저가 창을 보여줍니다.
-
-```text
-📊 정기 가격 알림
-✈️ CJJ → TPE 왕복
-2026-09-18 ~ 2026-09-20
-Google Flights 직항 왕복가
-1. 308,545KRW · EASTAR JET · 11:40 PM → 1:10 AM
-2. 381,095KRW · Aero K Airlines · 10:30 AM → 12:20 PM
-목표가: 350,000KRW
-위탁수하물: 정보 확인 불가
-Google Flights 검색결과: <검색결과 URL>
-```
-
-## 슬롯
-
-기본값:
-
-```text
-SLOT_ACTIVE_LIMIT=10
-```
-
-실제 슬롯 `1~10` 총 10개를 사용할 수 있습니다.
-
-- pause: 슬롯 유지
-- delete: 번호 해제/재사용
-- target_price: 필수
-- add마다 `generation` UUID 생성
-- 설정/상태 변경마다 `revision` 증가
-- 검색 저장 시 generation/revision 재검증
-
-DB/schema도 1~10 슬롯을 기본 지원하므로 기존 5슬롯 DB를 그대로 사용해도 별도 schema migration 없이 6~10번 슬롯을 추가할 수 있습니다.
-
-## 알람 표시 정책
-
-```text
-ALERT_NONSTOP_ONLY=true
-ALERT_MAX_OFFERS=4
-REQUIRE_VERIFIED_ALERTS=false
-```
-
-- 경유편 제외
-- 기본 최대 4개 직항 표시
-- 실제 직항이 2개면 2개만 표시
-- 동일 항공편이 DOM에서 중복 노출돼도 사용자 메시지에서는 한 번만 표시
-- 수하물이 확실히 확인되지 않으면 `정보 확인 불가`
-- 사용자에게 주는 URL은 Google Flights 검색결과 1개뿐
-
-## Telegram 명령
+주요 명령:
 
 ```text
 /flight add CJJ TPE 2026-09-18 2026-09-20 350000
@@ -125,126 +77,88 @@ REQUIRE_VERIFIED_ALERTS=false
 /help
 ```
 
-`/flight check`는 수동 조회만 하며 목표가 알림 latch를 소비하지 않습니다.
+## Docker 실행
 
-## Windows 테스트
-
-최초 1회:
-
-```text
-flight-bot - test win\01-setup-and-unit-test.cmd
-```
-
-실제 Google Flights 가격 acceptance:
-
-```text
-flight-bot - test win\02-live-cjj-tpe-visible.cmd
-```
-
-실제 Telegram 목표가/정기알림 테스트:
-
-```text
-flight-bot - test win\03-notification-test-menu.cmd
-```
-
-`03` 메뉴는 실행 중인 봇이 없으면 **Windows 로컬 실행 또는 Docker Compose 실행**을 선택할 수 있고, 다음을 즉시 테스트할 수 있습니다.
-
-```text
-슬롯 1개 목표가 알림
-슬롯 1개 정기알림
-전체 슬롯 일반 검색
-전체 슬롯 강제 정기알림
-```
-
-정기알림 강제 테스트는 목표가 one-shot 상태를 소비하거나 재무장하지 않습니다.
-
-## 관리자 테스트 API
-
-`ADMIN_SECRET`이 설정된 경우에만 활성화됩니다.
-
-```text
-POST /admin/check-all
-POST /admin/daily-summary
-POST /admin/check-slot/{slot_id}
-POST /admin/daily-summary/{slot_id}
-```
-
-의미:
-
-```text
-/admin/check-slot/1
-→ 슬롯 1 실제 Google 검색
-→ 목표가 조건을 만족하고 ARMED면 목표가 알림 1회
-
-/admin/daily-summary/1
-→ 슬롯 1 실제 Google 검색
-→ 정기알림 즉시 전송
-→ 목표가 latch는 건드리지 않음
-```
-
-모든 admin endpoint는 `X-Flight-Bot-Secret` 헤더가 필요합니다.
-
-## Docker
-
-`.env` 준비:
+브라우저 런타임이나 별도의 shared-memory 설정이 필요하지 않습니다.
 
 ```bash
 cp .env.example .env
-```
+# .env에 Telegram 등 필요한 값 입력
 
-최소 Telegram 알림 테스트 설정:
-
-```text
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_ALLOWED_CHAT_IDS=...
-ADMIN_SECRET=긴_랜덤문자열
-```
-
-실행:
-
-```bash
 docker compose up -d --build
 ```
 
-기본 compose는 HTTP를 host loopback에만 노출합니다.
-
-```text
-http://127.0.0.1:8080
-```
-
-중지:
+상태 확인:
 
 ```bash
-docker compose down
+docker compose ps
+docker compose logs -f flight-bot
+curl http://127.0.0.1:8080/health
 ```
 
-Health:
+정상 `/health` 예시 핵심값:
+
+```json
+{
+  "ok": true,
+  "provider": "naver-flights-sse",
+  "provider_transport": "naver_sse_api",
+  "browser_required": false,
+  "alert_max_offers": 5
+}
+```
+
+SQLite 데이터는 Compose named volume `flight_bot_data`에 보존됩니다. 컨테이너를 rebuild해도 감시 슬롯과 이력은 유지됩니다.
+
+## 환경변수
+
+핵심 Naver 설정:
 
 ```text
-GET /health
+NAVER_API_URL=https://flight-api.naver.com/flight/international/searchFlights
+NAVER_API_TIMEOUT_SECONDS=30
+NAVER_API_ATTEMPTS=3
+NAVER_MIN_REQUEST_INTERVAL_SECONDS=3
+ALERT_MAX_OFFERS=5
 ```
 
-핵심 필드:
+요청 간 최소 간격은 연속 수동 조회가 너무 빠르게 발생하는 것을 막기 위한 안전장치입니다.
+
+## Windows 실조회 테스트
+
+`flight-bot - test win` 폴더에서:
 
 ```text
-search_interval_hours=2
-daily_summary_hour=8
-browser_search_storage_isolated=true
-slots_max=10
-slots_design_capacity=10
+01-setup-and-unit-test.cmd
+02-NAVER-flight-test.bat
+03-NAVER-TELEGRAM-E2E.bat
 ```
 
-Docker image는 non-root `app` 사용자로 실행되고 `/data` SQLite volume을 사용합니다.
+`02`는 실제 Naver SSE 가격을 조회하고 TOP 5를 콘솔에 출력합니다. `03`은 같은 결과를 Telegram 한 곳에 실제 전송합니다.
 
-## CI
+## 개발 검증
 
-GitHub Actions:
+```bash
+python -m pip install -c constraints.txt -e '.[dev]'
+pytest -q
+python -m compileall -q src scripts
+
+docker build -t flight-bot:test .
+```
+
+CI에서도 단위/계약 테스트, Docker build, 컨테이너 health 확인을 수행하며 브라우저 자동화 런타임이 다시 들어오지 않는지 검사합니다.
+
+## 현재 아키텍처 경계
 
 ```text
-unit-linux
-unit-windows
-browser-contract
-docker-smoke
+Naver SSE API = 유일한 가격 소스
+SQLite        = 상태/이력 저장
+APScheduler   = 정기 조회
+Telegram     = 알림/명령
+Discord      = 선택 연동
+Kakao Skill  = 선택적 reactive webhook
+FastAPI      = health/admin endpoint
+Docker       = Ubuntu 홈서버 배포
 ```
 
-Docker smoke는 10슬롯 health 값과 admin 수동 테스트 route가 실제 production image에서 동작하는지까지 확인합니다.
+Naver 내부 API 구조가 변경될 경우 요청/응답 계약을 다시 검증해야 합니다. DOM 파싱 fallback은 두지 않습니다.

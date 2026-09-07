@@ -11,15 +11,12 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from .channels import MultiNotifier, build_telegram, start_discord
 from .config import SLOT_DESIGN_CAPACITY, get_settings
 from .db import Database
-from .runtime_results_provider import RuntimeGoogleResultsProvider
+from .providers import NaverFlightsSSEProvider
 from .service import FlightService
 
 settings = get_settings()
 db = Database(settings.database_path, slot_limit=settings.slot_active_limit)
-# Production/manual notification searches must use the same Cheapest-first flow
-# that passed the visible Windows acceptance test. Do not fall back to the old
-# simplified runtime selector here.
-service = FlightService(settings, db, provider=RuntimeGoogleResultsProvider(settings))
+service = FlightService(settings, db, provider=NaverFlightsSSEProvider(settings))
 notifier = MultiNotifier()
 service.set_notifier(notifier)
 scheduler = AsyncIOScheduler(timezone=settings.timezone)
@@ -47,9 +44,8 @@ async def lifespan(app: FastAPI):
     global telegram_app, discord_client
     settings.validate_runtime_security()
 
-    # One scheduled scan every configured interval. Exactly one of those scans
-    # also emits the regular daily price summary, so no extra Google request is
-    # created just for the summary.
+    # Each configured search hour performs one Naver SSE scan. The daily summary
+    # reuses one of those scans instead of creating a second provider request.
     for hour in settings.scheduled_search_hours:
         scheduler.add_job(
             service.check_all,
@@ -78,7 +74,7 @@ async def lifespan(app: FastAPI):
         await service.close()
 
 
-app = FastAPI(title="Flight Bot", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Flight Bot", version="0.3.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -88,13 +84,12 @@ async def health():
         "ok": True,
         "provider": service.provider.name,
         "provider_accepted_for_alerts": bool(getattr(service.provider, "accepted_for_alerts", True)),
+        "provider_transport": "naver_sse_api",
+        "browser_required": False,
         "require_verified_alerts": settings.require_verified_alerts,
-        "browser_headless": settings.browser_headless,
         "search_interval_hours": settings.search_interval_hours,
         "daily_summary_hour": settings.daily_summary_hour,
-        "browser_search_storage_isolated": True,
-        "cheapest_selected_full_reload": True,
-        "price_unavailable_recovery_reloads": 2,
+        "alert_max_offers": settings.alert_max_offers,
         "telegram_connected": notifier.telegram_app is not None,
         "discord_connected": discord_ready,
         "kakao_skill_enabled": bool(settings.kakao_skill_secret),
@@ -124,7 +119,6 @@ async def kakao_skill(request: Request, x_flight_bot_secret: str | None = Header
 
 @app.post("/admin/check-all")
 async def check_all(x_flight_bot_secret: str | None = Header(default=None)):
-    """Start the normal all-slot scan now, including one-shot target alerts."""
     _require_admin(x_flight_bot_secret)
     if service.scan_active:
         return {"accepted": False, "reason": "scan already active"}
@@ -134,7 +128,6 @@ async def check_all(x_flight_bot_secret: str | None = Header(default=None)):
 
 @app.post("/admin/daily-summary")
 async def daily_summary(x_flight_bot_secret: str | None = Header(default=None)):
-    """Force the regular summary now without consuming a target-alert latch."""
     _require_admin(x_flight_bot_secret)
     if service.scan_active:
         return {"accepted": False, "reason": "scan already active"}
@@ -144,29 +137,19 @@ async def daily_summary(x_flight_bot_secret: str | None = Header(default=None)):
 
 @app.post("/admin/check-slot/{slot_id}")
 async def check_slot(slot_id: int, x_flight_bot_secret: str | None = Header(default=None)):
-    """Run one real slot search and exercise its one-shot target alert."""
     _require_admin(x_flight_bot_secret)
     if service.scan_active:
         return {"accepted": False, "reason": "all-slot scan already active"}
-    result = await service.check_slot(
-        slot_id,
-        notify_target=True,
-        notify_daily_summary=False,
-    )
+    result = await service.check_slot(slot_id, notify_target=True, notify_daily_summary=False)
     return {"accepted": True, "mode": "target-check-slot", "slot_id": slot_id, "result": result}
 
 
 @app.post("/admin/daily-summary/{slot_id}")
 async def daily_summary_slot(slot_id: int, x_flight_bot_secret: str | None = Header(default=None)):
-    """Force one slot's regular summary without changing target-alert state."""
     _require_admin(x_flight_bot_secret)
     if service.scan_active:
         return {"accepted": False, "reason": "all-slot scan already active"}
-    result = await service.check_slot(
-        slot_id,
-        notify_target=False,
-        notify_daily_summary=True,
-    )
+    result = await service.check_slot(slot_id, notify_target=False, notify_daily_summary=True)
     return {"accepted": True, "mode": "daily-summary-slot", "slot_id": slot_id, "target_alerts": False, "result": result}
 
 

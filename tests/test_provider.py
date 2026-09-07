@@ -2,7 +2,7 @@ import pytest
 
 from flight_bot.config import Settings
 from flight_bot.models import WatchSlot
-from flight_bot.providers import GoogleFlightsPlaywrightProvider, parse_all_krw_prices, parse_krw_price
+from flight_bot.providers import NaverFlightsSSEProvider, ProviderError
 
 
 def slot(**overrides):
@@ -14,7 +14,7 @@ def slot(**overrides):
         destination="TPE",
         depart_date="2026-09-18",
         return_date="2026-09-20",
-        nonstop=False,
+        nonstop=True,
         checked_bag=0,
         enabled=True,
         target_price=350000,
@@ -23,53 +23,75 @@ def slot(**overrides):
     return WatchSlot(**data)
 
 
-def test_parse_krw_price():
-    assert parse_krw_price("₩311,811 round trip") == 311811
-    assert parse_krw_price("311,811 South Korean won") == 311811
-    assert parse_krw_price("no price") is None
+def _row(index: int, price: int) -> dict:
+    return {
+        "price": price,
+        "times": ["23:40", "01:10", "13:15", "16:40"],
+        "outbound_flight": f"ZE{780 + index}",
+        "return_flight": f"RF{320 + index}",
+        "outbound_airline_code": "ZE",
+        "return_airline_code": "RF",
+        "outbound_airline": "이스타항공",
+        "return_airline": "에어로케이",
+        "nonstop": True,
+    }
 
 
-def test_parse_all_prices_deduplicates_symbol_and_aria_forms():
-    assert parse_all_krw_prices("311,811 South Korean won / ₩311,811 / ₩415,400") == [311811, 415400]
-
-
-def test_query_builder_is_injectable():
-    seen = []
-
-    def builder(value):
-        seen.append(value)
-        return "https://example.test/search?tfs=fake&curr=KRW"
-
-    provider = GoogleFlightsPlaywrightProvider(Settings(_env_file=None), query_builder=builder)
-    value = slot()
-    assert provider.build_search_url(value).endswith("curr=KRW")
-    assert seen == [value]
-
-
-def test_results_provider_is_alert_capable_for_observed_google_prices():
-    provider = GoogleFlightsPlaywrightProvider(
-        Settings(_env_file=None), query_builder=lambda _: "https://example.test"
-    )
+def test_default_provider_policy_is_naver_direct_round_trip_top_five():
+    settings = Settings(_env_file=None)
+    provider = NaverFlightsSSEProvider(settings)
+    assert provider.name == "naver-flights-sse"
     assert provider.accepted_for_alerts is True
-    assert "results-observed" in provider.name
-    assert provider.settings.require_verified_alerts is False
-    assert provider.settings.alert_nonstop_only is True
+    assert settings.alert_nonstop_only is True
+    assert settings.alert_max_offers == 5
+    assert settings.require_verified_alerts is False
 
 
 @pytest.mark.asyncio
-async def test_provider_close_closes_reusable_browser_session():
-    class FakeSession:
-        def __init__(self):
-            self.closed = False
+async def test_provider_maps_ranked_sse_rows_to_offer(monkeypatch):
+    rows = [_row(i, 319620 + i * 10000) for i in range(6)]
 
-        async def close(self):
-            self.closed = True
+    def fake_query(*args, **kwargs):
+        return (
+            rows,
+            {
+                "advertised_lowest_direct": 319620,
+                "sse_event_count": 20,
+                "itinerary_count": 12,
+                "fare_mapping_count": 6,
+                "http_status": 201,
+                "content_type": "text/event-stream",
+            },
+            "data: {}",
+            {"status": {"isCompleted": True}},
+        )
 
-    session = FakeSession()
-    provider = GoogleFlightsPlaywrightProvider(
-        Settings(_env_file=None),
-        query_builder=lambda _: "https://example.test",
-        browser_session=session,
+    monkeypatch.setattr("flight_bot.providers.query_round_trip", fake_query)
+    provider = NaverFlightsSSEProvider(
+        Settings(_env_file=None, alert_max_offers=5, naver_min_request_interval_seconds=0)
     )
-    await provider.close()
-    assert session.closed is True
+    offer = await provider.search(slot())
+
+    assert offer.total_price == 319620
+    assert offer.observed_price == 319620
+    assert offer.outbound_flight == "ZE780"
+    assert offer.inbound_flight == "RF320"
+    assert offer.airline == "이스타항공 + 에어로케이"
+    assert offer.nonstop is True
+    assert offer.verification_status == "naver_sse_round_trip_fare"
+    assert len(offer.display_offers or []) == 5
+    assert "flight.naver.com/flights/international" in (offer.result_url or "")
+    assert offer.raw["sse_event_count"] == 20
+
+
+@pytest.mark.asyncio
+async def test_provider_wraps_api_failure(monkeypatch):
+    def fake_query(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("flight_bot.providers.query_round_trip", fake_query)
+    provider = NaverFlightsSSEProvider(
+        Settings(_env_file=None, naver_min_request_interval_seconds=0)
+    )
+    with pytest.raises(ProviderError, match="Naver Flights SSE search failed"):
+        await provider.search(slot())

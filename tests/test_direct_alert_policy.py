@@ -5,55 +5,10 @@ import pytest
 from flight_bot.config import Settings
 from flight_bot.db import Database
 from flight_bot.models import FlightOffer
-from flight_bot.providers import rank_alert_candidates
 from flight_bot.service import FlightService
 
 
-def _candidate(price: int, route: str, stop_text: str, airline: str) -> dict:
-    return {
-        "price": price,
-        "text": (
-            f"11:40 PM\n1:10 AM\n{airline}\n2 hr 30 min\n{route}\n"
-            f"{stop_text}\n₩{price:,}\nround trip"
-        ),
-        "source": "test",
-    }
-
-
-def test_default_product_policy_is_direct_observed_results_only():
-    settings = Settings(_env_file=None)
-    assert settings.alert_nonstop_only is True
-    assert settings.alert_max_offers == 4
-    assert settings.require_verified_alerts is False
-
-
-def test_rank_alert_candidates_excludes_connections_and_uses_available_count():
-    candidates = [
-        _candidate(308545, "CJJ-TPE", "Nonstop", "EASTAR JET"),
-        _candidate(381095, "CJJ-TPE", "Nonstop", "Aero K Airlines"),
-        _candidate(418730, "CJJ-TPE", "1 stop", "EASTAR JET"),
-        _candidate(420338, "CJJ-TPE", "1 stop", "Aero K Airlines"),
-    ]
-
-    ranked = rank_alert_candidates(candidates, nonstop_only=True, limit=4)
-
-    assert [item["price"] for item in ranked] == [308545, 381095]
-    assert all(item["nonstop"] is True for item in ranked)
-
-
-def test_rank_alert_candidate_limit_is_configurable_not_fixed_to_four():
-    candidates = [
-        _candidate(300000 + index * 10000, "CJJ-TPE", "Nonstop", f"Airline {index}")
-        for index in range(6)
-    ]
-
-    ranked = rank_alert_candidates(candidates, nonstop_only=True, limit=3)
-
-    assert len(ranked) == 3
-    assert [item["price"] for item in ranked] == [300000, 310000, 320000]
-
-
-def _service_and_slot(tmp_path, *, max_offers=4):
+def _service_and_slot(tmp_path, *, max_offers=5):
     settings = Settings(_env_file=None, alert_max_offers=max_offers)
     service = FlightService(settings, Database(str(tmp_path / "db.sqlite")), provider=object())
     slot = service.db.add_slot(
@@ -70,65 +25,78 @@ def _service_and_slot(tmp_path, *, max_offers=4):
     return service, slot
 
 
-def test_alert_message_contains_only_one_google_results_link(tmp_path):
+def _row(index: int, price: int) -> dict:
+    return {
+        "price": price,
+        "times": ["23:40", "01:10", "13:15", "16:40"],
+        "outbound_airline": "이스타항공",
+        "return_airline": "에어로케이",
+        "outbound_airline_code": "ZE",
+        "return_airline_code": "RF",
+        "outbound_flight": f"ZE{781 + index}",
+        "return_flight": f"RF{321 + index}",
+        "nonstop": True,
+    }
+
+
+def test_default_product_policy_is_direct_round_trip_top_five():
+    settings = Settings(_env_file=None)
+    assert settings.alert_nonstop_only is True
+    assert settings.alert_max_offers == 5
+    assert settings.require_verified_alerts is False
+
+
+def test_alert_message_lists_ranked_naver_round_trip_rows(tmp_path):
     service, slot = _service_and_slot(tmp_path)
-    result_url = "https://www.google.com/travel/flights/search?example=roundtrip"
+    result_url = "https://flight.naver.com/flights/international/example"
+    rows = [_row(i, 319620 + i * 10000) for i in range(5)]
     offer = FlightOffer(
-        provider="google-playwright-results-observed",
+        provider="naver-flights-sse",
         origin="CJJ",
         destination="TPE",
         depart_date="2026-09-18",
         return_date="2026-09-20",
-        total_price=308545,
-        observed_price_value=308545,
+        total_price=319620,
+        observed_price_value=319620,
         result_url=result_url,
         checked_baggage="정보 확인 불가",
-        display_offers=[
-            {"price": 308545, "airline": "EASTAR JET", "times": ["11:40 PM", "1:10 AM"], "nonstop": True},
-            {"price": 381095, "airline": "Aero K Airlines", "times": ["10:30 AM", "12:20 PM"], "nonstop": True},
-        ],
+        display_offers=rows,
         fetched_at=datetime.now(timezone.utc),
     )
 
     message = service.format_offer(slot, offer)
 
-    assert "308,545KRW" in message
-    assert "381,095KRW" in message
-    assert "Google Flights 직항 왕복가" in message
+    assert "Naver Flights 직항 왕복가 TOP 5" in message
+    assert "319,620KRW" in message
+    assert "359,620KRW" in message
+    assert "가는편: 이스타항공 ZE781" in message
+    assert "오는편: 에어로케이 RF321" in message
     assert message.count("https://") == 1
     assert result_url in message
-    assert "Booking" not in message
-    assert "checkout" not in message.lower()
-    assert "판매처" not in message
 
 
-def test_alert_window_dedupes_same_flight_exposed_twice_by_google(tmp_path):
+def test_alert_message_dedupes_identical_flight_pair(tmp_path):
     service, slot = _service_and_slot(tmp_path)
+    row = _row(0, 319620)
     offer = FlightOffer(
-        provider="google-playwright-results-observed",
+        provider="naver-flights-sse",
         origin="CJJ",
         destination="TPE",
         depart_date="2026-09-18",
         return_date="2026-09-20",
-        total_price=308545,
-        observed_price_value=308545,
-        result_url="https://www.google.com/travel/flights/search?dedupe=1",
-        display_offers=[
-            {"price": 308545, "airline": "EASTAR JET", "times": ["11:40 PM", "1:10 AM"], "flight_numbers": None, "nonstop": True},
-            {"price": 308545, "airline": "  EASTAR   JET ", "times": ["11:40 PM", "1:10 AM"], "flight_numbers": "", "nonstop": True},
-            {"price": 381095, "airline": "Aero K Airlines", "times": ["10:30 AM", "12:20 PM"], "flight_numbers": None, "nonstop": True},
-        ],
+        total_price=319620,
+        observed_price_value=319620,
+        result_url="https://flight.naver.com/flights/international/example",
+        display_offers=[row, dict(row)],
     )
 
     message = service.format_offer(slot, offer)
-
-    assert message.count("308,545KRW") == 1
-    assert message.count("381,095KRW") == 1
-    assert "3. " not in message
+    assert message.count("319,620KRW") == 1
+    assert "2. " not in message
 
 
 class _ObservedProvider:
-    name = "observed"
+    name = "naver-flights-sse"
     accepted_for_alerts = True
 
     async def search(self, slot, *, verify_below_price=None):
@@ -141,9 +109,9 @@ class _ObservedProvider:
             total_price=330000,
             observed_price_value=330000,
             price_verified=False,
-            verification_status="google_flights_displayed_round_trip",
-            result_url="https://www.google.com/travel/flights/search?observed=1",
-            display_offers=[{"price": 330000, "airline": "EASTAR JET", "times": [], "nonstop": True}],
+            verification_status="naver_sse_round_trip_fare",
+            result_url="https://flight.naver.com/flights/international/example",
+            display_offers=[_row(0, 330000)],
         )
 
 
@@ -156,7 +124,7 @@ class _Notifier:
 
 
 @pytest.mark.asyncio
-async def test_unverified_google_displayed_price_can_alert_in_current_scope(tmp_path):
+async def test_naver_api_displayed_price_can_alert_in_current_scope(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     slot = db.add_slot(
         platform="telegram",

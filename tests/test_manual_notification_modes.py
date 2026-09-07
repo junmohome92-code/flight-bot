@@ -28,13 +28,16 @@ class FakeProvider:
             observed_price_value=self.price,
             currency="KRW",
             price_verified=False,
-            verification_status="google_flights_displayed_round_trip",
-            result_url="https://www.google.com/travel/flights/search?manual-test=1",
+            verification_status="naver_sse_round_trip_fare",
+            result_url="https://flight.naver.com/flights/international/manual-test",
             display_offers=[
                 {
                     "price": self.price,
-                    "airline": "TEST AIR",
-                    "times": ["10:00 AM", "12:00 PM"],
+                    "outbound_airline": "TEST AIR",
+                    "return_airline": "TEST AIR",
+                    "outbound_flight": "TA100",
+                    "return_flight": "TA101",
+                    "times": ["10:00", "12:00", "15:00", "17:00"],
                     "nonstop": True,
                 }
             ],
@@ -78,6 +81,7 @@ async def test_manual_target_scan_consumes_one_shot_latch(tmp_path):
 
     assert len(notifier.messages) == 1
     assert notifier.messages[0].startswith("🔥 목표가 도달")
+    assert "Naver Flights 직항 왕복가" in notifier.messages[0]
     assert db.get_slot(1).alert_state == "ALERTED"
 
 

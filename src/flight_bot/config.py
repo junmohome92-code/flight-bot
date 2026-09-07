@@ -23,30 +23,20 @@ class Settings(BaseSettings):
     search_interval_hours: int = Field(default=2, ge=1, le=24)
     daily_summary_hour: int = Field(default=8, ge=0, le=23)
 
-    # Fixed slot IDs 1..10 are now available to the product. The setting may be
-    # lowered for a deployment, but can never exceed the validated design cap.
     slot_active_limit: int = Field(default=CURRENT_SLOT_LIMIT, ge=1, le=SLOT_DESIGN_CAPACITY)
 
-    # Google Flights / Playwright
-    browser_headless: bool = True
-    browser_timeout_ms: int = 45_000
-    browser_block_assets: bool = True
-    browser_debug_dir: str = ""
-    # Kept for config compatibility only. Runtime price searches use an
-    # isolated BrowserContext per search so cookies/cache/site storage do not
-    # carry over between two-hour observations.
-    browser_profile_dir: str = ""
-    google_language: str = "en"
-    google_currency: str = "KRW"
-    google_gl: str = "kr"
+    # Naver Flights SSE API. The runtime is browserless and Docker-friendly.
+    naver_api_url: str = "https://flight-api.naver.com/flight/international/searchFlights"
+    naver_api_timeout_seconds: int = Field(default=30, ge=5, le=120)
+    naver_api_attempts: int = Field(default=3, ge=1, le=5)
+    # Protect against accidental rapid repeated manual searches. Scheduled scans
+    # are much slower than this default, so normal monitoring is unaffected.
+    naver_min_request_interval_seconds: float = Field(default=3.0, ge=0.0, le=60.0)
 
-    # Product alert policy.
-    # Alerts are based on the prices Google Flights actually displays on the
-    # round-trip result page. Checkout/OTA verification is intentionally not
-    # required for the current product scope.
+    # Alert policy. Current product scope is adult 1 / economy / direct / round trip.
     require_verified_alerts: bool = False
     alert_nonstop_only: bool = True
-    alert_max_offers: int = Field(default=4, ge=1, le=10)
+    alert_max_offers: int = Field(default=5, ge=1, le=10)
 
     telegram_bot_token: str = ""
     telegram_allowed_chat_ids: str = ""
@@ -77,16 +67,10 @@ class Settings(BaseSettings):
 
     @property
     def scheduled_search_hours(self) -> list[int]:
-        """Return deterministic wall-clock search hours for the configured cadence.
-
-        The default is every two hours: 00,02,...,22. The daily summary hour
-        must be one of those search hours so the summary can reuse that scan
-        instead of creating an extra Google request.
-        """
+        """Return deterministic wall-clock search hours for the configured cadence."""
         return list(range(0, 24, self.search_interval_hours))
 
     def runtime_security_errors(self) -> list[str]:
-        """Return unsafe production channel combinations."""
         errors: list[str] = []
         if self.daily_summary_hour not in self.scheduled_search_hours:
             errors.append(

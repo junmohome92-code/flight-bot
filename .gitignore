@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example
+flight-bot - test win/telegram-test.env
 credentials*.json
 secrets*.json
 *.pem
@@ -11,9 +12,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
-.venv-win/
+.venv-provider-poc/
 *.db
 *.sqlite3
 artifacts/
-artifacts-live-result.txt
-/debug/
