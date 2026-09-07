@@ -19,7 +19,7 @@ HELP = """✈️ 항공권 감시봇 도움말
 버튼 메뉴에서 다음 기능을 사용할 수 있습니다.
 • ➕ 감시 등록: 최대 20개 슬롯
 • 🔎 바로 검색: 슬롯 등록 없이 1회 검색
-• 📋 내 슬롯: 슬롯별 지금 검색/목표가/일시정지/삭제
+• 📋 내 슬롯: 슬롯별 지금 검색(즉시 검색)/목표가/일시정지/삭제
 
 공항 입력은 코드뿐 아니라 이름도 지원합니다.
 예: 청주, 인천, 도쿄, 서울, CJJ, TYO
@@ -183,8 +183,8 @@ class FlightService:
         suggestions = suggest_locations(value, limit=4)
         if suggestions:
             labels = ", ".join(f"{option.name} {option.code}" for option in suggestions)
-            return f"'{value}' 위치 코드를 찾을 수 없습니다. 비슷한 실제 공항/도시: {labels}"
-        return f"'{value}' 위치 코드를 찾을 수 없습니다. 실제 IATA 공항/도시 코드를 확인해 주세요."
+            return f"'{value}' IATA 위치 코드를 찾을 수 없습니다. 비슷한 실제 공항/도시: {labels}"
+        return f"'{value}' IATA 위치 코드를 찾을 수 없습니다. 실제 IATA 공항/도시 코드를 확인해 주세요."
 
     def validate_trip(self, origin: str, destination: str, depart_date: str, return_date: str) -> str | None:
         origin = origin.strip().upper()
@@ -386,7 +386,7 @@ class FlightService:
                 await self.notifier.send(
                     slot.owner_platform,
                     slot.owner_id,
-                    "📊 슬롯 정기 가격 확인\n" + self.format_offer(slot, offer),
+                    "📊 정기 가격 알림\n" + self.format_offer(slot, offer),
                 )
             except Exception as exc:
                 return self.format_offer(slot, offer) + f"\n정기 알림 전송 실패: {type(exc).__name__}"
