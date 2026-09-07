@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main, "poc/**"]
+    branches: [main, "poc/**", "feat/**"]
   pull_request:
   workflow_dispatch:
 
@@ -25,6 +25,13 @@ jobs:
         run: python -m compileall -q src scripts tests
       - name: Run full test suite
         run: pytest -q
+      - name: Validate installer and compose
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n install.sh
+          cp .env.example .env
+          docker compose config >/dev/null
       - name: Enforce browserless production runtime
         shell: bash
         run: |
@@ -48,6 +55,8 @@ jobs:
               cat /tmp/health.json
               grep -q '"provider":"naver-flights-sse"' /tmp/health.json
               grep -q '"browser_required":false' /tmp/health.json
+              grep -q '"slots_max":20' /tmp/health.json
+              grep -q '"ad_hoc_search_enabled":true' /tmp/health.json
               exit 0
             fi
             sleep 1

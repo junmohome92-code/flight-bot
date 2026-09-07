@@ -44,8 +44,6 @@ async def lifespan(app: FastAPI):
     global telegram_app, discord_client
     settings.validate_runtime_security()
 
-    # Each configured search hour performs one Naver SSE scan. The daily summary
-    # reuses one of those scans instead of creating a second provider request.
     for hour in settings.scheduled_search_hours:
         scheduler.add_job(
             service.check_all,
@@ -74,7 +72,7 @@ async def lifespan(app: FastAPI):
         await service.close()
 
 
-app = FastAPI(title="Flight Bot", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="Flight Bot", version="0.4.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -82,6 +80,7 @@ async def health():
     discord_ready = bool(notifier.discord_client and notifier.discord_client.is_ready())
     return {
         "ok": True,
+        "version": "0.4.0",
         "provider": service.provider.name,
         "provider_accepted_for_alerts": bool(getattr(service.provider, "accepted_for_alerts", True)),
         "provider_transport": "naver_sse_api",
@@ -98,6 +97,7 @@ async def health():
         "slots_used": len(db.list_slots()),
         "slots_max": settings.slot_active_limit,
         "slots_design_capacity": SLOT_DESIGN_CAPACITY,
+        "ad_hoc_search_enabled": True,
     }
 
 
@@ -115,6 +115,28 @@ async def kakao_skill(request: Request, x_flight_bot_secret: str | None = Header
     if user_id not in settings.kakao_user_ids:
         return kakao_response("허용되지 않은 사용자입니다.")
     return kakao_response(await service.command("kakao", user_id, utterance))
+
+
+@app.post("/admin/search")
+async def admin_search(
+    origin: str,
+    destination: str,
+    depart_date: str,
+    return_date: str,
+    x_flight_bot_secret: str | None = Header(default=None),
+):
+    _require_admin(x_flight_bot_secret)
+    result = await service.search_now(origin, destination, depart_date, return_date)
+    return {
+        "accepted": True,
+        "mode": "ad-hoc-search",
+        "persisted": False,
+        "origin": origin.upper(),
+        "destination": destination.upper(),
+        "depart_date": depart_date,
+        "return_date": return_date,
+        "result": result,
+    }
 
 
 @app.post("/admin/check-all")

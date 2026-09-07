@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -9,13 +9,15 @@ from flight_bot.models import FlightOffer
 
 
 def add(db, n, *, owner_id="1"):
+    depart = date(2026, 9, 18) + timedelta(days=n)
+    returning = depart + timedelta(days=2)
     return db.add_slot(
         platform="telegram",
         owner_id=owner_id,
         origin="CJJ",
         destination="TPE",
-        depart_date=f"2026-09-{18+n:02d}",
-        return_date=f"2026-09-{20+n:02d}",
+        depart_date=depart.isoformat(),
+        return_date=returning.isoformat(),
         target_price=350000,
         nonstop=False,
         checked_bag=0,
@@ -38,16 +40,16 @@ def offer(price=311811):
     )
 
 
-def test_ten_active_slots_and_pause_still_occupies(tmp_path):
+def test_twenty_slots_and_pause_still_occupies(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
-    assert [add(db, n).id for n in range(10)] == list(range(1, 11))
+    assert [add(db, n).id for n in range(20)] == list(range(1, 21))
     db.set_enabled(1, False)
-    with pytest.raises(ValueError, match="10개"):
-        add(db, 10)
+    with pytest.raises(ValueError, match="20개"):
+        add(db, 20)
 
 
-def test_slot_limit_can_be_lowered_without_changing_ten_slot_schema(tmp_path):
-    assert SLOT_DESIGN_CAPACITY == 10
+def test_slot_limit_can_be_lowered_without_changing_twenty_slot_schema(tmp_path):
+    assert SLOT_DESIGN_CAPACITY == 20
     db = Database(str(tmp_path / "db.sqlite"), slot_limit=5)
     assert [add(db, n).id for n in range(5)] == [1, 2, 3, 4, 5]
     with pytest.raises(ValueError, match="5개"):

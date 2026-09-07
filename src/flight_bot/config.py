@@ -6,8 +6,8 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-SLOT_DESIGN_CAPACITY = 10
-CURRENT_SLOT_LIMIT = 10
+SLOT_DESIGN_CAPACITY = 20
+CURRENT_SLOT_LIMIT = 20
 
 
 class Settings(BaseSettings):
