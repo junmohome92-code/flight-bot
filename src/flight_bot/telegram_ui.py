@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.ext import CallbackContext
 
 from .service import HELP, FlightService
@@ -10,8 +10,8 @@ from .service import HELP, FlightService
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
-        ["➕ 감시 등록", "🔎 바로 검색"],
-        ["📋 내 슬롯", "❓ 도움말"],
+        [KeyboardButton("➕ 감시 등록"), KeyboardButton("🔎 바로 검색")],
+        [KeyboardButton("📋 내 슬롯"), KeyboardButton("❓ 도움말")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -76,17 +76,17 @@ def _get_flow(context: CallbackContext) -> Flow | None:
 
 def slot_list_keyboard(service: FlightService, platform: str, owner_id: str) -> InlineKeyboardMarkup:
     slots = service.db.list_slots(owner_platform=platform, owner_id=owner_id)
-    rows = []
+    buttons: list[InlineKeyboardButton] = []
     for slot in slots:
         state = "🟢" if slot.enabled else "⏸"
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    f"{state} #{slot.id} {slot.origin}→{slot.destination}",
-                    callback_data=f"slot:{slot.id}",
-                )
-            ]
+        price = f" {slot.last_observed_price // 1000}k" if slot.last_observed_price else ""
+        buttons.append(
+            InlineKeyboardButton(
+                f"{state} #{slot.id} {slot.origin}→{slot.destination}{price}",
+                callback_data=f"slot:{slot.id}",
+            )
         )
+    rows = [buttons[index : index + 2] for index in range(0, len(buttons), 2)]
     rows.append([InlineKeyboardButton("➕ 새 감시", callback_data="menu:add"), InlineKeyboardButton("🔎 바로 검색", callback_data="menu:search")])
     return InlineKeyboardMarkup(rows)
 
@@ -138,14 +138,6 @@ async def start_flow(update: Update, context: CallbackContext, mode: str) -> Non
         await update.callback_query.message.reply_text(prefix + text, reply_markup=markup)
     elif update.effective_message:
         await update.effective_message.reply_text(prefix + text, reply_markup=markup)
-
-
-async def show_menu(update: Update, text: str = "원하는 기능을 선택해 주세요.") -> None:
-    if update.callback_query:
-        await update.callback_query.answer()
-        await update.callback_query.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
-    elif update.effective_message:
-        await update.effective_message.reply_text(text, reply_markup=MAIN_KEYBOARD)
 
 
 async def show_slots(update: Update, service: FlightService, owner_id: str) -> None:
@@ -258,9 +250,10 @@ async def _apply_target(update: Update, context: CallbackContext, service: Fligh
         await update.effective_message.reply_text(str(exc))
         return True
     _put_flow(context, None)
+    updated = service.db.get_slot(slot.id)
     await update.effective_message.reply_text(
         f"🎯 슬롯 #{slot.id} 목표가를 {price:,}원으로 변경했습니다.",
-        reply_markup=slot_detail_keyboard(slot.id, slot.enabled),
+        reply_markup=slot_detail_keyboard(slot.id, updated.enabled),
     )
     return True
 
@@ -306,7 +299,7 @@ async def handle_callback(update: Update, context: CallbackContext, service: Fli
 
     if data.startswith("target:"):
         flow = _get_flow(context)
-        if not flow:
+        if not flow or flow.step != "target":
             await query.answer("입력 단계가 만료되었습니다.")
             return
         price = int(data.split(":", 1)[1])
@@ -318,8 +311,9 @@ async def handle_callback(update: Update, context: CallbackContext, service: Fli
                 return
             service.db.set_target(slot.id, price)
             _put_flow(context, None)
+            updated = service.db.get_slot(slot.id)
             await query.answer("변경했습니다.")
-            await query.message.reply_text(f"🎯 슬롯 #{slot.id} 목표가를 {price:,}원으로 변경했습니다.", reply_markup=slot_detail_keyboard(slot.id, slot.enabled))
+            await query.message.reply_text(f"🎯 슬롯 #{slot.id} 목표가를 {price:,}원으로 변경했습니다.", reply_markup=slot_detail_keyboard(slot.id, updated.enabled))
             return
         flow.data["target"] = str(price)
         _put_flow(context, flow)
@@ -351,6 +345,7 @@ async def handle_callback(update: Update, context: CallbackContext, service: Fli
         await query.message.reply_text("✅ 감시 슬롯을 등록했습니다.\n" + service.format_slot(slot), reply_markup=slot_detail_keyboard(slot.id, slot.enabled))
         return
 
+    slot_id = None
     for prefix in ("slot:", "slotcheck:", "slottarget:", "slottoggle:", "slotdeleteconfirm:", "slotdelete:"):
         if data.startswith(prefix):
             try:
@@ -359,7 +354,7 @@ async def handle_callback(update: Update, context: CallbackContext, service: Fli
                 await query.answer("잘못된 슬롯입니다.")
                 return
             break
-    else:
+    if slot_id is None:
         await query.answer()
         return
 
@@ -374,7 +369,8 @@ async def handle_callback(update: Update, context: CallbackContext, service: Fli
         await query.answer("검색 중...")
         await query.message.reply_text(f"🔎 슬롯 #{slot_id}을 지금 검색합니다...")
         result = await service.check_slot(slot_id, notify_target=False, notify_daily_summary=False)
-        await query.message.reply_text(result, reply_markup=slot_detail_keyboard(slot.id, slot.enabled), disable_web_page_preview=True)
+        updated = service.db.get_slot(slot_id) or slot
+        await query.message.reply_text(result, reply_markup=slot_detail_keyboard(slot.id, updated.enabled), disable_web_page_preview=True)
     elif data.startswith("slottarget:"):
         _put_flow(context, Flow(mode="target", step="target", data={}, slot_id=slot_id))
         await query.answer()
