@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import discord
-from telegram import BotCommand, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from .config import Settings
@@ -42,6 +42,31 @@ class MultiNotifier:
             )
 
         raise NotificationUnavailableError(f"Unsupported notification platform: {platform}")
+
+    async def send_summary(self, platform: str, recipient_id: str, text: str, slot_ids: list[int]) -> None:
+        """Send one compact daily report per user.
+
+        Telegram gets two detail buttons per row. Tapping a button reuses the
+        existing per-slot immediate search callback, so summary storage stays
+        small and the user always sees a fresh TOP 5 result.
+        """
+        if platform != "telegram":
+            await self.send(platform, recipient_id, text)
+            return
+        if not self.telegram_app:
+            raise NotificationUnavailableError("Telegram notifier is not connected")
+        buttons = [
+            InlineKeyboardButton(f"#{slot_id} 상세", callback_data=f"slotcheck:{slot_id}")
+            for slot_id in slot_ids
+        ]
+        rows = [buttons[index : index + 2] for index in range(0, len(buttons), 2)]
+        markup = InlineKeyboardMarkup(rows) if rows else None
+        await self.telegram_app.bot.send_message(
+            chat_id=int(recipient_id),
+            text=text,
+            reply_markup=markup,
+            disable_web_page_preview=True,
+        )
 
 
 async def build_telegram(settings: Settings, service: FlightService, notifier: MultiNotifier):
