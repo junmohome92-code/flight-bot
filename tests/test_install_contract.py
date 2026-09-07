@@ -11,8 +11,11 @@ def test_install_script_and_env_defaults_are_user_friendly():
 
     assert "docker compose config" in install
     assert "docker compose up -d --build" in install
+    assert "mkdir -p data" in install
     assert "SLOT_ACTIVE_LIMIT=20" in env
     assert "TELEGRAM_BOT_TOKEN=" in env
     assert "TELEGRAM_ALLOWED_CHAT_IDS=" in env
     assert "restart: unless-stopped" in compose
-    assert "flight_bot_data:/data" in compose
+    assert "./data:/data" in compose
+    assert "flight_bot_data:/data" not in compose
+    assert "DATABASE_PATH: /data/flight_bot.db" in compose
