@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 
 import discord
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import BotCommand, Update
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from .config import Settings
-from .service import FlightService
+from .service import HELP, FlightService
+from .telegram_ui import MAIN_KEYBOARD, handle_callback, handle_flow_text, show_slots, start_flow
 
 
 class NotificationUnavailableError(RuntimeError):
@@ -23,7 +24,7 @@ class MultiNotifier:
         if platform == "telegram":
             if not self.telegram_app:
                 raise NotificationUnavailableError("Telegram notifier is not connected")
-            await self.telegram_app.bot.send_message(chat_id=int(recipient_id), text=text)
+            await self.telegram_app.bot.send_message(chat_id=int(recipient_id), text=text, disable_web_page_preview=True)
             return
 
         if platform == "discord":
@@ -36,8 +37,6 @@ class MultiNotifier:
             return
 
         if platform == "kakao":
-            # Kakao Skill is reactive only.  Proactive notification requires a
-            # separate BizMessage/AlimTalk integration; printing is not delivery.
             raise NotificationUnavailableError(
                 "Kakao proactive notification is not configured (BizMessage/AlimTalk required)"
             )
@@ -50,21 +49,85 @@ async def build_telegram(settings: Settings, service: FlightService, notifier: M
         return None
     app = Application.builder().token(settings.telegram_bot_token).build()
 
-    async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not update.effective_chat or not update.effective_message:
-            return
+    def allowed(update: Update) -> tuple[bool, str | None]:
+        if not update.effective_chat:
+            return False, None
         chat_id = str(update.effective_chat.id)
         if settings.telegram_chat_ids and chat_id not in settings.telegram_chat_ids:
-            return
-        text = update.effective_message.text or ""
-        result = await service.command("telegram", chat_id, text)
-        await update.effective_message.reply_text(result)
+            return False, chat_id
+        return True, chat_id
 
-    app.add_handler(CommandHandler("start", handle))
-    app.add_handler(CommandHandler("help", handle))
-    app.add_handler(CommandHandler("flight", handle))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
+    async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        ok, _chat_id = allowed(update)
+        if not ok or not update.effective_message:
+            return
+        context.user_data.pop("flight_flow", None)
+        await update.effective_message.reply_text(
+            "✈️ 항공권 감시봇\n버튼으로 감시 등록·바로 검색·슬롯 관리를 할 수 있습니다.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+
+    async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        ok, _chat_id = allowed(update)
+        if not ok or not update.effective_message:
+            return
+        await update.effective_message.reply_text(HELP, reply_markup=MAIN_KEYBOARD)
+
+    async def flight_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        ok, chat_id = allowed(update)
+        if not ok or not chat_id or not update.effective_message:
+            return
+        result = await service.command("telegram", chat_id, update.effective_message.text or "")
+        await update.effective_message.reply_text(result, reply_markup=MAIN_KEYBOARD, disable_web_page_preview=True)
+
+    async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        ok, chat_id = allowed(update)
+        if not ok or not chat_id or not update.effective_message:
+            return
+        text = (update.effective_message.text or "").strip()
+
+        if text == "➕ 감시 등록":
+            await start_flow(update, context, "add")
+            return
+        if text == "🔎 바로 검색":
+            await start_flow(update, context, "search")
+            return
+        if text == "📋 내 슬롯":
+            await show_slots(update, service, chat_id)
+            return
+        if text in {"❓ 도움말", "/?", "도움말", "help"}:
+            await update.effective_message.reply_text(HELP, reply_markup=MAIN_KEYBOARD)
+            return
+        if await handle_flow_text(update, context, service, chat_id, text):
+            return
+
+        result = await service.command("telegram", chat_id, text)
+        await update.effective_message.reply_text(result, reply_markup=MAIN_KEYBOARD, disable_web_page_preview=True)
+
+    async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        ok, chat_id = allowed(update)
+        if not ok or not chat_id:
+            if update.callback_query:
+                await update.callback_query.answer("허용되지 않은 대화입니다.", show_alert=True)
+            return
+        await handle_callback(update, context, service, chat_id)
+
+    app.add_handler(CommandHandler("start", start_handler))
+    app.add_handler(CommandHandler("help", help_handler))
+    app.add_handler(CommandHandler("flight", flight_command_handler))
+    # Telegram's normal command grammar does not include '?', so catch /? as text explicitly.
+    app.add_handler(MessageHandler(filters.Regex(r"^/\?$"), help_handler))
+    app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+
     await app.initialize()
+    await app.bot.set_my_commands(
+        [
+            BotCommand("start", "메인 메뉴"),
+            BotCommand("help", "도움말"),
+            BotCommand("flight", "고급 명령어"),
+        ]
+    )
     await app.start()
     await app.updater.start_polling()
     notifier.telegram_app = app
@@ -91,7 +154,7 @@ class DiscordBot(discord.Client):
         if self.settings.discord_channel_ids and channel_id not in self.settings.discord_channel_ids:
             return
         text = message.content.strip()
-        if not (text.startswith("/flight") or text in {"/help", "help", "도움말"}):
+        if not (text.startswith("/flight") or text in {"/help", "/?", "help", "도움말"}):
             return
         result = await self.service.command("discord", channel_id, text)
         await message.channel.send(result)
