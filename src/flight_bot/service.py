@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import re
 from datetime import date
+from uuid import uuid4
 
 from .config import Settings
 from .db import Database, StaleSlotError
@@ -11,7 +12,15 @@ from .models import ALERT_ARMED, ALERT_SENDING, ALERTED, FlightOffer, WatchSlot
 from .providers import NaverFlightsSSEProvider, ProviderError
 
 
-HELP = """항공권 감시봇 명령어
+HELP = """✈️ 항공권 감시봇 도움말
+
+버튼 메뉴에서 다음 기능을 사용할 수 있습니다.
+• ➕ 감시 등록: 최대 20개 슬롯
+• 🔎 바로 검색: 슬롯 등록 없이 1회 검색
+• 📋 내 슬롯: 슬롯별 즉시 검색/목표가/일시정지/삭제
+
+명령어도 계속 지원합니다.
+/flight search CJJ TPE 2026-09-18 2026-09-20
 /flight add CJJ TPE 2026-09-18 2026-09-20 350000
 /flight list
 /flight check 1
@@ -19,16 +28,13 @@ HELP = """항공권 감시봇 명령어
 /flight pause 1
 /flight resume 1
 /flight delete 1
-/help
+/help 또는 /?
 
-감시 슬롯은 1~10번까지 총 10개를 사용할 수 있습니다.
-pause 상태도 슬롯을 차지합니다.
-가격 검색은 기본 2시간 주기입니다.
-가격 소스는 Naver Flights SSE API이며 브라우저는 사용하지 않습니다.
-검색 조건은 성인 1명 / 이코노미 / 직항 / 왕복입니다.
-조회 결과는 가격순 최대 TOP 5 왕복 조합을 보여줍니다.
-목표가 도달 알림은 목표가 설정당 최초 1회만 전송합니다.
-그 이후에는 하루 1회 정기 가격 알림에서 최신 직항 왕복가를 보여줍니다.
+검색 조건: 성인 1명 / 이코노미 / 직항 / 왕복
+가격 소스: Naver Flights SSE API
+조회 결과: 가격순 최대 TOP 5 왕복 조합
+정기 검색: 기본 2시간 주기
+목표가 도달 알림: 목표가 설정당 최초 1회
 """
 
 _AIRPORT_RE = re.compile(r"^[A-Z]{3}$")
@@ -59,7 +65,7 @@ class FlightService:
             f"{slot.depart_date}~{slot.return_date} / 직항 왕복 / 목표 {slot.target_price:,}{slot.currency}{observed}"
         )
 
-    def format_offer(self, slot: WatchSlot, offer: FlightOffer) -> str:
+    def format_offer(self, slot: WatchSlot, offer: FlightOffer, *, include_target: bool = True) -> str:
         raw_rows = list(offer.display_offers or [])
         rows: list[dict] = []
         seen_rows: set[tuple] = set()
@@ -122,12 +128,13 @@ class FlightService:
             price_lines.append(f"1. {offer.observed_price:,}{offer.currency}")
 
         result_url = offer.result_url or offer.booking_url or "링크 확인 불가"
+        target_line = f"\n목표가: {slot.target_price:,}{slot.currency}" if include_target else ""
         return (
             f"✈️ {slot.origin} → {slot.destination} 왕복\n"
             f"{slot.depart_date} ~ {slot.return_date}\n"
             f"Naver Flights 직항 왕복가 TOP {min(self.settings.alert_max_offers, len(rows))}\n"
             + "\n".join(price_lines)
-            + f"\n목표가: {slot.target_price:,}{slot.currency}"
+            + target_line
             + f"\n위탁수하물: {offer.checked_baggage or '정보 확인 불가'}"
             + f"\nNaver Flights 검색결과: {result_url}"
         )
@@ -144,9 +151,77 @@ class FlightService:
     def _valid_airport(value: str) -> bool:
         return bool(_AIRPORT_RE.fullmatch((value or "").strip().upper()))
 
-    @staticmethod
-    def _same_owner(slot: WatchSlot, platform: str, owner_id: str) -> bool:
-        return slot.owner_platform == platform and slot.owner_id == owner_id
+    def validate_trip(self, origin: str, destination: str, depart_date: str, return_date: str) -> str | None:
+        origin = origin.strip().upper()
+        destination = destination.strip().upper()
+        if not (self._valid_airport(origin) and self._valid_airport(destination)):
+            return "공항 코드는 영문 3자리 IATA 코드로 입력해 주세요. 예: CJJ TPE"
+        if origin == destination:
+            return "출발지와 도착지는 서로 달라야 합니다."
+        if not (self._valid_date(depart_date) and self._valid_date(return_date)):
+            return "날짜 형식은 YYYY-MM-DD 입니다."
+        if date.fromisoformat(return_date) < date.fromisoformat(depart_date):
+            return "귀국일은 출발일보다 빠를 수 없습니다."
+        return None
+
+    async def add_watch(
+        self,
+        platform: str,
+        owner_id: str,
+        origin: str,
+        destination: str,
+        depart_date: str,
+        return_date: str,
+        target_price: int,
+    ) -> WatchSlot:
+        error = self.validate_trip(origin, destination, depart_date, return_date)
+        if error:
+            raise ValueError(error)
+        if int(target_price) <= 0:
+            raise ValueError("목표가는 0원보다 커야 합니다.")
+        async with self._operation_lock:
+            return self.db.add_slot(
+                platform=platform,
+                owner_id=owner_id,
+                origin=origin.strip().upper(),
+                destination=destination.strip().upper(),
+                depart_date=depart_date,
+                return_date=return_date,
+                target_price=int(target_price),
+                nonstop=True,
+                checked_bag=0,
+            )
+
+    async def search_now(
+        self,
+        origin: str,
+        destination: str,
+        depart_date: str,
+        return_date: str,
+    ) -> str:
+        error = self.validate_trip(origin, destination, depart_date, return_date)
+        if error:
+            return error
+        slot = WatchSlot(
+            id=0,
+            owner_platform="adhoc",
+            owner_id=uuid4().hex,
+            origin=origin.strip().upper(),
+            destination=destination.strip().upper(),
+            depart_date=depart_date,
+            return_date=return_date,
+            nonstop=True,
+            checked_bag=0,
+            enabled=False,
+            target_price=0,
+        )
+        try:
+            offer = await self.provider.search(slot)
+        except ProviderError as exc:
+            return f"조회 실패: {exc}"
+        except Exception as exc:
+            return f"조회 실패: 예상하지 못한 오류 ({type(exc).__name__})"
+        return self.format_offer(slot, offer, include_target=False)
 
     async def close(self) -> None:
         close = getattr(self.provider, "close", None)
@@ -297,47 +372,39 @@ class FlightService:
 
     async def command(self, platform: str, owner_id: str, text: str) -> str:
         text = (text or "").strip()
-        if text in {"/help", "help", "도움말", "시작", "/start"}:
+        if text in {"/help", "/?", "help", "도움말", "시작", "/start"}:
             return HELP
         if not text.startswith("/flight"):
-            return "현재는 명시적 /flight 명령을 지원합니다.\n\n" + HELP
+            return HELP
         parts = text.split()
         if len(parts) < 2:
             return HELP
         action = parts[1].lower()
 
+        if action == "search":
+            if len(parts) < 6:
+                return "형식: /flight search CJJ TPE 2026-09-18 2026-09-20"
+            return await self.search_now(parts[2], parts[3], parts[4], parts[5])
+
         if action == "add":
             if len(parts) < 7:
                 return "형식: /flight add CJJ TPE 2026-09-18 2026-09-20 350000"
-            origin = parts[2].upper()
-            destination = parts[3].upper()
-            if not (self._valid_airport(origin) and self._valid_airport(destination)):
-                return "공항 코드는 영문 3자리 IATA 코드로 입력해 주세요. 예: CJJ TPE"
-            if origin == destination:
-                return "출발지와 도착지는 서로 달라야 합니다."
-            if not (self._valid_date(parts[4]) and self._valid_date(parts[5])):
-                return "날짜 형식은 YYYY-MM-DD 입니다."
-            if date.fromisoformat(parts[5]) < date.fromisoformat(parts[4]):
-                return "귀국일은 출발일보다 빠를 수 없습니다."
             try:
                 target = int(parts[6].replace(",", ""))
             except ValueError:
                 return "목표가는 숫자로 입력해 주세요. 예: 350000"
-            async with self._operation_lock:
-                try:
-                    slot = self.db.add_slot(
-                        platform=platform,
-                        owner_id=owner_id,
-                        origin=origin,
-                        destination=destination,
-                        depart_date=parts[4],
-                        return_date=parts[5],
-                        target_price=target,
-                        nonstop=True,
-                        checked_bag=0,
-                    )
-                except ValueError as exc:
-                    return str(exc)
+            try:
+                slot = await self.add_watch(
+                    platform,
+                    owner_id,
+                    parts[2],
+                    parts[3],
+                    parts[4],
+                    parts[5],
+                    target,
+                )
+            except ValueError as exc:
+                return str(exc)
             return "감시 슬롯을 추가했습니다.\n" + self.format_slot(slot)
 
         if action == "list":
