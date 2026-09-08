@@ -61,7 +61,7 @@ def add_slot(db, owner_id, origin, destination, target=200000):
 
 
 @pytest.mark.asyncio
-async def test_daily_report_is_one_message_per_user_not_one_per_slot(tmp_path):
+async def test_daily_report_is_one_message_per_conversation_not_one_per_slot(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     one = add_slot(db, "owner-a", "CJJ", "TPE")
     two = add_slot(db, "owner-a", "ICN", "NRT")
@@ -87,13 +87,15 @@ async def test_daily_report_is_one_message_per_user_not_one_per_slot(tmp_path):
     text = owner_a[2]
     assert owner_a[3] == [one.id, two.id, three.id]
     assert "활성 슬롯 3개" in text
-    assert f"#{one.id} CJJ→TPE  318,000원  ▼12,000" in text
-    assert f"#{two.id} ICN→NRT  305,000원  ▲5,000" in text
-    assert f"#{three.id} PUS→FUK  250,000원  ─" in text
+    assert "#1 CJJ→TPE  318,000원  ▼12,000" in text
+    assert "#2 ICN→NRT  305,000원  ▲5,000" in text
+    assert "#3 PUS→FUK  250,000원  ─" in text
 
     owner_b = next(item for item in notifier.summaries if item[1] == "owner-b")
     assert owner_b[3] == [four.id]
-    assert "SEL→TYO" in owner_b[2]
+    # Internal id is #4 here, but owner-b sees its own local slot #1.
+    assert "#1 SEL→TYO" in owner_b[2]
+    assert "#4 SEL→TYO" not in owner_b[2]
 
 
 @pytest.mark.asyncio
@@ -111,4 +113,4 @@ async def test_paused_slots_are_omitted_from_daily_report(tmp_path):
 
     assert len(notifier.summaries) == 1
     assert notifier.summaries[0][3] == [active.id]
-    assert f"#{paused.id}" not in notifier.summaries[0][2]
+    assert "#2" not in notifier.summaries[0][2]
