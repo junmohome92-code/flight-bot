@@ -58,14 +58,17 @@ jobs:
           for i in {1..30}; do
             if curl --fail --silent http://127.0.0.1:8080/health > /tmp/health.json; then
               cat /tmp/health.json
-              grep -q '"version":"0.5.0"' /tmp/health.json
+              grep -q '"version":"0.6.0"' /tmp/health.json
               grep -q '"provider":"naver-flights-sse"' /tmp/health.json
               grep -q '"browser_required":false' /tmp/health.json
               grep -q '"slots_max":20' /tmp/health.json
+              grep -q '"slot_limit_scope":"per-conversation"' /tmp/health.json
               grep -q '"ad_hoc_search_enabled":true' /tmp/health.json
               grep -q '"city_search_enabled":true' /tmp/health.json
+              grep -q '"worldwide_location_search_enabled":true' /tmp/health.json
+              grep -q '"multilingual_location_search_enabled":true' /tmp/health.json
               grep -q '"iata_validation_enabled":true' /tmp/health.json
-              grep -q '"daily_summary_mode":"one-message-per-user"' /tmp/health.json
+              grep -q '"daily_summary_mode":"one-message-per-conversation"' /tmp/health.json
               test -f data/.ci-persistence-marker
               test -f data/flight_bot.db
               docker compose down
@@ -86,8 +89,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install Windows contract test dependency
-        run: python -m pip install pytest==8.4.2
+      - name: Install project and Windows contract tests
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -c constraints.txt -e '.[dev]'
       - name: Compile browserless Naver scripts
         run: python -m compileall -q src scripts tests/test_provider_poc.py tests/test_windows_test_harness.py
       - name: Run Naver SSE and Windows launcher contracts

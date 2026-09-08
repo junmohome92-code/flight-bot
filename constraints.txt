@@ -1,4 +1,6 @@
 # Known-good direct dependency versions for Python 3.12.
+# airportsearch is pinned to an immutable GitHub source archive in pyproject.toml
+# because release 0.1.0 is not published on PyPI.
 airportsdata==20260905
 apscheduler==3.11.3
 discord.py==2.7.1

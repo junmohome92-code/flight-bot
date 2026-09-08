@@ -289,7 +289,7 @@ async def test_add_rejects_return_date_before_departure(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_add_rejects_non_iata_airport_code(tmp_path):
+async def test_add_rejects_unknown_free_form_location_without_saving(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     service = FlightService(Settings(), db, provider=FakeProvider([]))
     result = await service.command(
@@ -297,4 +297,6 @@ async def test_add_rejects_non_iata_airport_code(tmp_path):
         "1",
         "/flight add CHEONGJU TPE 2026-09-18 2026-09-20 350000",
     )
-    assert "IATA" in result
+    assert "위치를 찾을 수 없습니다" in result
+    assert "CJJ" in result
+    assert db.list_slots() == []

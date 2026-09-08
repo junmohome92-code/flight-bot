@@ -8,7 +8,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 from .config import Settings
 from .service import HELP, FlightService
-from .telegram_ui import MAIN_KEYBOARD, handle_callback, handle_flow_text, show_slots, start_flow
+from .telegram_ui import MAIN_KEYBOARD, clear_flow, handle_callback, handle_flow_text, show_slots, start_flow
 
 
 class NotificationUnavailableError(RuntimeError):
@@ -16,9 +16,10 @@ class NotificationUnavailableError(RuntimeError):
 
 
 class MultiNotifier:
-    def __init__(self):
+    def __init__(self, service: FlightService | None = None):
         self.telegram_app: Application | None = None
         self.discord_client: discord.Client | None = None
+        self.service = service
 
     async def send(self, platform: str, recipient_id: str, text: str) -> None:
         if platform == "telegram":
@@ -44,21 +45,27 @@ class MultiNotifier:
         raise NotificationUnavailableError(f"Unsupported notification platform: {platform}")
 
     async def send_summary(self, platform: str, recipient_id: str, text: str, slot_ids: list[int]) -> None:
-        """Send one compact daily report per user.
+        """Send one compact daily report per conversation.
 
-        Telegram gets two detail buttons per row. Tapping a button reuses the
-        existing per-slot immediate search callback, so summary storage stays
-        small and the user always sees a fresh TOP 5 result.
+        Telegram callback payloads use internal DB ids, while button labels use
+        the conversation-local slot number when the service is available.
         """
         if platform != "telegram":
             await self.send(platform, recipient_id, text)
             return
         if not self.telegram_app:
             raise NotificationUnavailableError("Telegram notifier is not connected")
-        buttons = [
-            InlineKeyboardButton(f"#{slot_id} 상세", callback_data=f"slotcheck:{slot_id}")
-            for slot_id in slot_ids
-        ]
+
+        buttons: list[InlineKeyboardButton] = []
+        for slot_id in slot_ids:
+            label_no = slot_id
+            if self.service is not None:
+                slot = self.service.db.get_slot(slot_id)
+                if slot is not None:
+                    label_no = self.service.slot_number(slot)
+            buttons.append(
+                InlineKeyboardButton(f"#{label_no} 상세", callback_data=f"slotcheck:{slot_id}")
+            )
         rows = [buttons[index : index + 2] for index in range(0, len(buttons), 2)]
         markup = InlineKeyboardMarkup(rows) if rows else None
         await self.telegram_app.bot.send_message(
@@ -73,6 +80,7 @@ async def build_telegram(settings: Settings, service: FlightService, notifier: M
     if not settings.telegram_bot_token:
         return None
     app = Application.builder().token(settings.telegram_bot_token).build()
+    notifier.service = service
 
     def allowed(update: Update) -> tuple[bool, str | None]:
         if not update.effective_chat:
@@ -83,10 +91,10 @@ async def build_telegram(settings: Settings, service: FlightService, notifier: M
         return True, chat_id
 
     async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        ok, _chat_id = allowed(update)
-        if not ok or not update.effective_message:
+        ok, chat_id = allowed(update)
+        if not ok or not chat_id or not update.effective_message:
             return
-        context.user_data.pop("flight_flow", None)
+        clear_flow(context, chat_id)
         await update.effective_message.reply_text(
             "✈️ 항공권 감시봇\n버튼으로 감시 등록·바로 검색·슬롯 관리를 할 수 있습니다.",
             reply_markup=MAIN_KEYBOARD,
@@ -99,6 +107,8 @@ async def build_telegram(settings: Settings, service: FlightService, notifier: M
         await update.effective_message.reply_text(HELP, reply_markup=MAIN_KEYBOARD)
 
     async def flight_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        # Compatibility fallback only. It stays functional for existing users but
+        # is no longer advertised in Telegram help/command menus.
         ok, chat_id = allowed(update)
         if not ok or not chat_id or not update.effective_message:
             return
@@ -112,10 +122,10 @@ async def build_telegram(settings: Settings, service: FlightService, notifier: M
         text = (update.effective_message.text or "").strip()
 
         if text == "➕ 감시 등록":
-            await start_flow(update, context, "add")
+            await start_flow(update, context, "add", chat_id)
             return
         if text == "🔎 바로 검색":
-            await start_flow(update, context, "search")
+            await start_flow(update, context, "search", chat_id)
             return
         if text == "📋 내 슬롯":
             await show_slots(update, service, chat_id)
@@ -126,8 +136,10 @@ async def build_telegram(settings: Settings, service: FlightService, notifier: M
         if await handle_flow_text(update, context, service, chat_id, text):
             return
 
-        result = await service.command("telegram", chat_id, text)
-        await update.effective_message.reply_text(result, reply_markup=MAIN_KEYBOARD, disable_web_page_preview=True)
+        # Important for group operation: arbitrary conversation text is ignored.
+        # When Telegram privacy mode is disabled for free-text flows, the bot must
+        # not answer every normal group message with HELP.
+        return
 
     async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ok, chat_id = allowed(update)
@@ -150,7 +162,6 @@ async def build_telegram(settings: Settings, service: FlightService, notifier: M
         [
             BotCommand("start", "메인 메뉴"),
             BotCommand("help", "도움말"),
-            BotCommand("flight", "고급 명령어"),
         ]
     )
     await app.start()

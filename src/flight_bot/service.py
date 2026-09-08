@@ -14,41 +14,21 @@ from .models import ALERT_ARMED, ALERT_SENDING, ALERTED, FlightOffer, WatchSlot
 from .providers import NaverFlightsSSEProvider, ProviderError
 
 
-HELP = """✈️ 항공권 감시봇 도움말
+HELP = """✈️ 항공권 감시봇
 
-버튼 메뉴에서 다음 기능을 사용할 수 있습니다.
-• ➕ 감시 등록: 최대 20개 슬롯
-• 🔎 바로 검색: 슬롯 등록 없이 1회 검색
-• 📋 내 슬롯: 슬롯별 지금 검색(즉시 검색)/목표가/일시정지/삭제
+➕ 감시 등록 — 노선·날짜·목표가 등록
+🔎 바로 검색 — 슬롯 없이 TOP 5 조회
+📋 내 슬롯 — 검색·목표가·정지·삭제
 
-공항 입력은 코드뿐 아니라 이름도 지원합니다.
-예: 청주, 인천, 도쿄, 서울, CJJ, TYO
-도쿄/서울/오사카처럼 공항이 여러 개인 도시는
-'도시 전체' 또는 개별 공항을 버튼으로 선택할 수 있습니다.
-잘못된 IATA 코드는 저장하지 않고 비슷한 실제 공항을 추천합니다.
-
-명령어도 계속 지원합니다.
-/flight search CJJ TPE 2026-09-18 2026-09-20
-/flight search SEL TYO 2026-09-22 2026-09-24
-/flight add CJJ TPE 2026-09-18 2026-09-20 350000
-/flight list
-/flight check 1
-/flight target 1 330000
-/flight pause 1
-/flight resume 1
-/flight delete 1
-/help 또는 /?
-
-검색 조건: 성인 1명 / 이코노미 / 직항 / 왕복
-가격 소스: Naver Flights SSE API
-조회 결과: 가격순 최대 TOP 5 왕복 조합
-정기 검색: 기본 2시간 주기
-아침 정기 보고: 사용자당 요약 메시지 1개
-목표가 도달 알림: 목표가 설정당 최초 1회
+🌍 한글 / 영어 / IATA 공항·도시 검색
+👥 채팅방마다 감시 슬롯 최대 20개
+🔔 기본 2시간마다 가격 확인
+🔥 목표가 도달 알림은 목표가 설정당 1회
+📊 하루 1회 정기보고
 """
 
 # Kept for backward-compatible tests and basic syntax checks. Actual save/search
-# validation additionally checks the bundled real IATA catalogue.
+# validation additionally checks the bundled real IATA/multilingual catalogue.
 _AIRPORT_RE = re.compile(r"^[A-Z]{3}$")
 
 
@@ -69,12 +49,17 @@ class FlightService:
         return self._scan_active
 
     @staticmethod
-    def format_slot(slot: WatchSlot) -> str:
+    def slot_number(slot: WatchSlot) -> int:
+        return int(slot.slot_no or slot.id)
+
+    @classmethod
+    def format_slot(cls, slot: WatchSlot) -> str:
         state = "ON" if slot.enabled else "PAUSED"
         observed = f" / 최근 {slot.last_observed_price:,}{slot.currency}" if slot.last_observed_price else ""
         return (
-            f"#{slot.id} [{state}/{slot.alert_state}] "
-            f"{display_location(slot.origin)}→{display_location(slot.destination)} "
+            f"#{cls.slot_number(slot)} [{state}/{slot.alert_state}] "
+            f"{display_location(slot.origin, slot.origin_type)}→"
+            f"{display_location(slot.destination, slot.destination_type)} "
             f"{slot.depart_date}~{slot.return_date} / 직항 왕복 / 목표 {slot.target_price:,}{slot.currency}{observed}"
         )
 
@@ -157,7 +142,8 @@ class FlightService:
         result_url = offer.result_url or offer.booking_url or "링크 확인 불가"
         target_line = f"\n목표가: {slot.target_price:,}{slot.currency}" if include_target else ""
         return (
-            f"✈️ {display_location(slot.origin)} → {display_location(slot.destination)} 왕복\n"
+            f"✈️ {display_location(slot.origin, slot.origin_type)} → "
+            f"{display_location(slot.destination, slot.destination_type)} 왕복\n"
             f"{slot.depart_date} ~ {slot.return_date}\n"
             f"Naver Flights 직항 왕복가 TOP {min(self.settings.alert_max_offers, len(rows))}\n"
             + "\n".join(price_lines)
@@ -183,19 +169,28 @@ class FlightService:
         suggestions = suggest_locations(value, limit=4)
         if suggestions:
             labels = ", ".join(f"{option.name} {option.code}" for option in suggestions)
-            return f"'{value}' IATA 위치 코드를 찾을 수 없습니다. 비슷한 실제 공항/도시: {labels}"
-        return f"'{value}' IATA 위치 코드를 찾을 수 없습니다. 실제 IATA 공항/도시 코드를 확인해 주세요."
+            return f"'{value}' 위치를 찾을 수 없습니다. 비슷한 실제 공항/도시: {labels}"
+        return f"'{value}' 위치를 찾을 수 없습니다. 실제 공항/도시 이름 또는 IATA 코드를 확인해 주세요."
 
-    def validate_trip(self, origin: str, destination: str, depart_date: str, return_date: str) -> str | None:
+    def validate_trip(
+        self,
+        origin: str,
+        destination: str,
+        depart_date: str,
+        return_date: str,
+        *,
+        origin_type: str | None = None,
+        destination_type: str | None = None,
+    ) -> str | None:
         origin = origin.strip().upper()
         destination = destination.strip().upper()
         if not self._valid_airport(origin):
             return self._unknown_location_message(origin)
         if not self._valid_airport(destination):
             return self._unknown_location_message(destination)
-        if resolve_code_token(origin) is None:
+        if resolve_code_token(origin, expected_type=origin_type) is None:
             return self._unknown_location_message(origin)
-        if resolve_code_token(destination) is None:
+        if resolve_code_token(destination, expected_type=destination_type) is None:
             return self._unknown_location_message(destination)
         if origin == destination:
             return "출발지와 도착지는 서로 달라야 합니다."
@@ -214,18 +209,34 @@ class FlightService:
         depart_date: str,
         return_date: str,
         target_price: int,
+        *,
+        origin_type: str | None = None,
+        destination_type: str | None = None,
     ) -> WatchSlot:
-        error = self.validate_trip(origin, destination, depart_date, return_date)
+        origin_option = resolve_code_token(origin, expected_type=origin_type)
+        destination_option = resolve_code_token(destination, expected_type=destination_type)
+        error = self.validate_trip(
+            origin,
+            destination,
+            depart_date,
+            return_date,
+            origin_type=origin_type,
+            destination_type=destination_type,
+        )
         if error:
             raise ValueError(error)
+        if not origin_option or not destination_option:
+            raise ValueError("출발지 또는 도착지를 확인할 수 없습니다.")
         if int(target_price) <= 0:
             raise ValueError("목표가는 0원보다 커야 합니다.")
         async with self._operation_lock:
             return self.db.add_slot(
                 platform=platform,
                 owner_id=owner_id,
-                origin=origin.strip().upper(),
-                destination=destination.strip().upper(),
+                origin=origin_option.code,
+                origin_type=origin_option.location_type,
+                destination=destination_option.code,
+                destination_type=destination_option.location_type,
                 depart_date=depart_date,
                 return_date=return_date,
                 target_price=int(target_price),
@@ -239,22 +250,38 @@ class FlightService:
         destination: str,
         depart_date: str,
         return_date: str,
+        *,
+        origin_type: str | None = None,
+        destination_type: str | None = None,
     ) -> str:
-        error = self.validate_trip(origin, destination, depart_date, return_date)
+        origin_option = resolve_code_token(origin, expected_type=origin_type)
+        destination_option = resolve_code_token(destination, expected_type=destination_type)
+        error = self.validate_trip(
+            origin,
+            destination,
+            depart_date,
+            return_date,
+            origin_type=origin_type,
+            destination_type=destination_type,
+        )
         if error:
             return error
+        if not origin_option or not destination_option:
+            return "출발지 또는 도착지를 확인할 수 없습니다."
         slot = WatchSlot(
             id=0,
             owner_platform="adhoc",
             owner_id=uuid4().hex,
-            origin=origin.strip().upper(),
-            destination=destination.strip().upper(),
+            origin=origin_option.code,
+            destination=destination_option.code,
             depart_date=depart_date,
             return_date=return_date,
             nonstop=True,
             checked_bag=0,
             enabled=False,
             target_price=0,
+            origin_type=origin_option.location_type,
+            destination_type=destination_option.location_type,
         )
         try:
             offer = await self.provider.search(slot)
@@ -295,7 +322,7 @@ class FlightService:
     ) -> str:
         slot = self.db.get_slot(slot_id)
         if not slot:
-            return f"슬롯 #{slot_id}을 찾을 수 없습니다."
+            return "슬롯을 찾을 수 없습니다."
 
         provider_alert_capable = bool(getattr(self.provider, "accepted_for_alerts", True))
         verify_threshold = slot.target_price if slot.alert_state == ALERT_ARMED else None
@@ -406,8 +433,9 @@ class FlightService:
             previous = entry.get("previous")
             failed = bool(entry.get("failed"))
             route = f"{slot.origin}→{slot.destination}"
+            number = self.slot_number(slot)
             if failed or current is None:
-                lines.append(f"#{slot.id} {route}  ⚠ 조회 실패")
+                lines.append(f"#{number} {route}  ⚠ 조회 실패")
                 continue
             current = int(current)
             if previous is None:
@@ -421,7 +449,7 @@ class FlightService:
                 else:
                     change = "─"
             target = " 🎯" if current <= slot.target_price else ""
-            lines.append(f"#{slot.id} {route}  {current:,}원  {change}{target}")
+            lines.append(f"#{number} {route}  {current:,}원  {change}{target}")
         lines.extend(["", "아래 상세 버튼을 누르면 해당 슬롯을 즉시 다시 검색합니다."])
         return "\n".join(lines)
 
@@ -432,6 +460,8 @@ class FlightService:
             if not entries:
                 continue
             text = self.format_daily_summary(entries)
+            # Callback payloads keep the internal id; user-visible text uses the
+            # conversation-local slot_no.
             slot_ids = [int(entry["slot"].id) for entry in entries]
             try:
                 send_summary = getattr(self.notifier, "send_summary", None)
@@ -480,6 +510,8 @@ class FlightService:
             self._scan_active = False
 
     async def command(self, platform: str, owner_id: str, text: str) -> str:
+        # Kept as a compatibility/admin fallback. Telegram no longer advertises
+        # these commands in the user-facing help/UI.
         text = (text or "").strip()
         if text in {"/help", "/?", "help", "도움말", "시작", "/start"}:
             return HELP
@@ -523,46 +555,46 @@ class FlightService:
         if action == "target":
             if len(parts) < 4 or not parts[2].isdigit():
                 return "형식: /flight target <슬롯번호> <목표가>"
-            slot_id = int(parts[2])
+            slot_no = int(parts[2])
             try:
                 price = int(parts[3].replace(",", ""))
             except ValueError:
                 return "목표가는 숫자로 입력해 주세요."
             async with self._operation_lock:
-                slot = self.db.get_owned_slot(slot_id, platform, owner_id)
+                slot = self.db.get_owned_slot_by_no(slot_no, platform, owner_id)
                 if not slot:
-                    return f"슬롯 #{slot_id}을 찾을 수 없거나 이 대화에서 만든 슬롯이 아닙니다."
+                    return f"슬롯 #{slot_no}을 찾을 수 없거나 이 대화에서 만든 슬롯이 아닙니다."
                 try:
-                    self.db.set_target(slot_id, price)
+                    self.db.set_target(slot.id, price)
                 except ValueError as exc:
                     return str(exc)
-            return f"슬롯 #{slot_id} 목표가를 {price:,}KRW로 변경했습니다. 목표가 도달 알림 1회를 다시 활성화했습니다."
+            return f"슬롯 #{slot_no} 목표가를 {price:,}KRW로 변경했습니다. 목표가 도달 알림 1회를 다시 활성화했습니다."
 
         if action in {"check", "pause", "resume", "delete"}:
             if len(parts) < 3 or not parts[2].isdigit():
                 return f"형식: /flight {action} <슬롯번호>"
-            slot_id = int(parts[2])
+            slot_no = int(parts[2])
             if action == "check":
                 async with self._operation_lock:
-                    slot = self.db.get_owned_slot(slot_id, platform, owner_id)
+                    slot = self.db.get_owned_slot_by_no(slot_no, platform, owner_id)
                     if not slot:
-                        return f"슬롯 #{slot_id}을 찾을 수 없거나 이 대화에서 만든 슬롯이 아닙니다."
+                        return f"슬롯 #{slot_no}을 찾을 수 없거나 이 대화에서 만든 슬롯이 아닙니다."
                     return await self._check_slot_locked(
-                        slot_id,
+                        slot.id,
                         notify_target=False,
                         notify_daily_summary=False,
                     )
 
             async with self._operation_lock:
-                slot = self.db.get_owned_slot(slot_id, platform, owner_id)
+                slot = self.db.get_owned_slot_by_no(slot_no, platform, owner_id)
                 if not slot:
-                    return f"슬롯 #{slot_id}을 찾을 수 없거나 이 대화에서 만든 슬롯이 아닙니다."
+                    return f"슬롯 #{slot_no}을 찾을 수 없거나 이 대화에서 만든 슬롯이 아닙니다."
                 if action == "pause":
-                    self.db.set_enabled(slot_id, False)
-                    return f"슬롯 #{slot_id} 감시를 일시정지했습니다. 슬롯은 계속 점유합니다."
+                    self.db.set_enabled(slot.id, False)
+                    return f"슬롯 #{slot_no} 감시를 일시정지했습니다. 슬롯은 계속 점유합니다."
                 if action == "resume":
-                    self.db.set_enabled(slot_id, True)
-                    return f"슬롯 #{slot_id} 감시를 재개했습니다."
-                self.db.delete_slot(slot_id)
-                return f"슬롯 #{slot_id}을 삭제했습니다. 이 번호는 다음 add에서 다시 사용됩니다."
+                    self.db.set_enabled(slot.id, True)
+                    return f"슬롯 #{slot_no} 감시를 재개했습니다."
+                self.db.delete_slot(slot.id)
+                return f"슬롯 #{slot_no}을 삭제했습니다. 이 번호는 다음 add에서 다시 사용됩니다."
         return HELP

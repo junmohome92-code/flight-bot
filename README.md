@@ -4,76 +4,122 @@
 
 ## 핵심 기능
 
-- Naver Flights SSE API 단일 가격 소스
-- 성인 1명 / 이코노미 / 직항 / 왕복
+- Naver Flights SSE API 단일 **가격 소스**
+- 성인 1명 / 이코노미 / 직항 / 왕복 / KRW
 - 가격순 TOP 5 왕복 조합
 - 가는편/오는편 항공사·편명·시간·실제 출도착 공항 표시
-- **감시 슬롯 최대 20개**
-- **슬롯 등록 없이 바로 검색 가능** — 슬롯/DB 감시항목을 소비하지 않음
-- **각 슬롯에서 `지금 검색` 버튼으로 즉시 재조회**
-- **실제 IATA 공항 목록 검증 + 오타 추천**
-- **도시 전체 검색 지원** — 예: `SEL:city ↔ TYO:city`
-- Telegram 버튼 UI로 등록/검색/목표가 변경/정지/삭제
-- 기본 2시간 주기 감시 + 목표가 알림
-- **아침 정기 보고는 사용자당 메시지 1개로 통합**
-- SQLite 상태 저장
+- **Telegram 채팅방마다 감시 슬롯 최대 20개**
+- 한 Bot Token/서버 1개로 여러 개인·그룹채팅 동시 운영
+- 슬롯 등록 없이 바로 검색
+- 슬롯별 `지금 검색`
+- 실제 IATA 검증 + 오타 추천
+- **전세계 한글·영어·IATA 공항/도시 검색**
+- 다공항 도시는 `도시 전체`와 개별 공항을 구분
+- Telegram 버튼 UI
+- 기본 2시간 주기 가격 감시
+- 목표가 도달 알림은 목표가 설정당 최초 1회
+- **하루 1회 채팅방별 통합 정기보고**
+- SQLite 상태 저장 + host bind mount
 - Docker/Compose 배포
 
 ## Telegram 사용
 
-`/start`를 보내면 하단 메뉴가 고정됩니다.
+`/start`를 보내면 아래 메뉴가 고정됩니다.
 
 ```text
 ➕ 감시 등록     🔎 바로 검색
 📋 내 슬롯       ❓ 도움말
 ```
 
-### 공항/도시 입력
+### 도움말
 
-등록/바로검색에서 공항 코드만 외울 필요가 없습니다.
-
-```text
-청주
-→ 청주 CJJ
-
-도쿄
-→ 도쿄 전체 TYO
-→ 나리타 NRT
-→ 하네다 HND
-
-서울
-→ 서울 전체 SEL
-→ 인천 ICN
-→ 김포 GMP
-```
-
-`CJX`처럼 존재하지 않는 코드를 입력하면 슬롯에 저장하지 않고 비슷한 실제 공항/도시를 버튼으로 추천합니다. 전체 IATA 공항 검증 데이터는 `airportsdata` 패키지에 포함된 로컬 카탈로그를 사용하므로 입력 검증 때 외부 API를 추가 호출하지 않습니다.
-
-현재 도시 전체 검색으로 준비된 대표 코드:
+사용자 화면에서는 복잡한 `/flight ...` 명령어를 안내하지 않습니다. 버튼 UI 기준으로 필요한 기능만 짧게 표시합니다.
 
 ```text
-SEL 서울
-TYO 도쿄
-OSA 오사카
-SPK 삿포로
-NYC 뉴욕
-LON 런던
-PAR 파리
-ROM 로마
-MIL 밀라노
-WAS 워싱턴
-BJS 베이징
+✈️ 항공권 감시봇
+
+➕ 감시 등록 — 노선·날짜·목표가 등록
+🔎 바로 검색 — 슬롯 없이 TOP 5 조회
+📋 내 슬롯 — 검색·목표가·정지·삭제
+
+🌍 한글 / 영어 / IATA 공항·도시 검색
+👥 채팅방마다 감시 슬롯 최대 20개
+🔔 기본 2시간마다 가격 확인
+🔥 목표가 도달 알림은 목표가 설정당 1회
+📊 하루 1회 정기보고
 ```
 
-도시 전체를 선택하면 네이버 요청에도 `city` 타입을 사용합니다. 예:
+기존 `/flight ...` 명령은 하위 호환용으로 내부에 남아 있지만 Telegram 명령 메뉴/도움말에는 노출하지 않습니다.
+
+## 전세계 공항·도시 입력
+
+출발지/도착지 단계에서 특정 네 개 노선만 보여주는 고정 빠른선택 버튼은 사용하지 않습니다. 직접 입력이 기본입니다.
 
 ```text
-SEL:city → TYO:city
+🌍 출발 도시 또는 공항을 입력해 주세요.
+한글 · 영어 · IATA 모두 가능합니다.
+예: 히로시마 / Hiroshima / HIJ
 ```
 
-개별 공항을 선택하면 기존처럼 `airport` 타입을 사용합니다.
+입력 방식 예:
 
-### 슬롯 관리
+```text
+히로시마  → HIJ 후보
+Hiroshima → HIJ 후보
+HIJ       → HIJ
+
+도쿄      → 도쿄 전체 TYO / 나리타 NRT / 하네다 HND
+New York  → 뉴욕 전체 NYC / JFK / LGA / EWR 등
+```
+
+정확한 공항 코드는 `airportsdata`로 검증합니다. 이름 검색은 오프라인 multilingual airport index를 사용하며, 현재 사용 버전은 재현성을 위해 upstream commit SHA에 고정되어 있습니다. 오타/모호한 입력은 자동 저장하지 않고 버튼 후보를 보여준 뒤 사용자가 선택해야 저장됩니다.
+
+도시 전체를 선택하면 Naver 요청에도 `locationType=city`, 개별 공항을 선택하면 `locationType=airport`가 전달됩니다. 이 타입은 슬롯 DB에도 명시적으로 저장됩니다.
+
+## 그룹채팅 운영
+
+봇 서버는 여러 개 띄울 필요가 없습니다. **Bot Token 1개 + 서버 프로세스 1개**로 여러 Telegram 채팅방을 처리합니다.
+
+`.env`에 허용할 Chat ID를 쉼표로 넣습니다.
+
+```text
+TELEGRAM_ALLOWED_CHAT_IDS=-1001111111111,-1002222222222
+```
+
+각 채팅방은 서로 독립적인 슬롯 번호 `#1 ~ #20`을 가집니다.
+
+```text
+그룹 A: #1 ... #20
+그룹 B: #1 ... #20
+개인채팅: #1 ... #20
+```
+
+DB 내부 Primary Key는 전역 ID를 유지하지만 사용자에게 보이는 `slot_no`는 `(platform, chat_id)`별로 분리됩니다. 한 그룹의 슬롯/정기보고/목표가 알림은 다른 그룹에 섞이지 않습니다.
+
+등록 중 입력 흐름도 채팅방별로 분리되어 같은 사용자가 서로 다른 그룹에서 동시에 등록을 진행해도 상태가 덮이지 않습니다. 자유 텍스트 입력 단계는 Telegram 그룹 Privacy Mode에서도 안정적으로 동작하도록 `ForceReply`를 사용합니다. 일반 그룹 대화에는 봇이 자동으로 도움말을 답하지 않습니다.
+
+## 감시 등록 후 알림 흐름
+
+의도한 lifecycle은 다음과 같습니다.
+
+```text
+감시 등록
+  ↓
+현재 TOP 5 즉시 1회 조회
+(이 조회에서는 목표가 알림을 소비하지 않음)
+  ↓
+2시간 정기 스캔 계속
+  ↓
+목표가 최초 충족 시 🔥 알림 1회
+  ↓
+같은 목표가로는 중복 목표가 알림 없음
+  ↓
+하루 1회 정기보고는 계속
+```
+
+목표가를 변경하면 목표가 알림 latch가 다시 `ARMED`되어 새 목표가 기준으로 1회 알림을 받을 수 있습니다.
+
+## 슬롯 관리
 
 `📋 내 슬롯`에서 슬롯을 누르면:
 
@@ -83,50 +129,25 @@ SEL:city → TYO:city
 🗑 삭제           ⬅️ 목록
 ```
 
-도움말은 `/help` 또는 `/?`로 바로 볼 수 있습니다.
+일시정지 슬롯은 슬롯 번호를 계속 점유하지만 정기 검색/보고에서는 제외됩니다.
 
-명령어 방식도 유지합니다.
+## 정기보고
 
-```text
-/flight search CJJ TPE 2026-09-18 2026-09-20
-/flight search SEL TYO 2026-09-22 2026-09-24
-/flight add CJJ TPE 2026-09-18 2026-09-20 350000
-/flight list
-/flight check 1
-/flight target 1 330000
-/flight pause 1
-/flight resume 1
-/flight delete 1
-```
+기본값은 `DAILY_SUMMARY_HOUR=8`, `TIMEZONE=Asia/Seoul`이므로 오전 8시 정기보고입니다. `SEARCH_INTERVAL_HOURS=2`이면 00/02/04/.../22시에 가격을 확인하되 정기보고 메시지는 설정된 시간에만 보냅니다.
 
-## 아침 정기 보고
-
-슬롯이 10개 또는 20개여도 슬롯마다 Telegram 메시지를 따로 보내지 않습니다. **사용자당 정기 보고 1개**로 합칩니다.
-
-예:
+각 채팅방은 슬롯 수와 관계없이 **정기보고 한 메시지**로 합칩니다.
 
 ```text
-📊 09/07 항공권 정기 보고
+📊 09/08 항공권 정기 보고
 활성 슬롯 4개 · 최저 왕복가 기준
 
 #1 CJJ→TPE  319,620원  ▼12,000
 #2 ICN→NRT  281,000원  ─
 #3 SEL→TYO  294,300원  ▲4,500
 #4 PUS→FUK  198,000원  🎯
-
-아래 상세 버튼을 누르면 해당 슬롯을 즉시 다시 검색합니다.
 ```
 
-Telegram에서는 보고서 아래에:
-
-```text
-[ #1 상세 ] [ #2 상세 ]
-[ #3 상세 ] [ #4 상세 ]
-```
-
-처럼 버튼이 붙습니다. `상세`를 누르면 해당 슬롯을 즉시 다시 검색해 최신 TOP 5를 보여줍니다. `▼/▲`는 직전 관측 가격 대비 변화이며, `🎯`는 현재 최저가가 목표가 이하라는 뜻입니다. 목표가 최초 도달 알림은 정기 보고와 별도의 중요 알림으로 계속 동작합니다.
-
-일시정지 슬롯은 정기 검색/보고에서 제외됩니다.
+`▼/▲/─`는 직전 관측 대비 변화이고 `🎯`는 현재 가격이 목표가 이하라는 뜻입니다. `#N 상세` 버튼을 누르면 해당 슬롯의 최신 TOP 5를 즉시 다시 검색합니다.
 
 ## 가격 수집 구조
 
@@ -144,33 +165,33 @@ itineraries + fareMappings 결합
 가격 오름차순 TOP 5
 ```
 
-2026-09-07 Windows 실조회에서 `CJJ → TPE → CJJ`, `2026-09-18 ~ 2026-09-20` 조건으로 HTTP `201`, `text/event-stream`, SSE 20개 이벤트를 수신했고 최저 왕복가 **319,620원**을 확인했습니다. 같은 시점 네이버 항공권 화면 표시 가격과 일치했습니다.
+2026-09-07 검증된 실조회:
 
-## 가장 쉬운 Docker 설치
+```text
+CJJ → TPE → CJJ
+2026-09-18 ~ 2026-09-20
+최저 319,620 KRW
+PASS
+
+SEL:city → TYO:city → SEL:city
+2026-09-22 ~ 2026-09-24
+20 direct candidates
+최저 450,400 KRW
+Naver advertised lowest와 일치
+PASS
+```
+
+## Docker 설치 / 업데이트
 
 ```bash
 git clone https://github.com/junmohome92-code/flight-bot.git
 cd flight-bot
 cp .env.example .env
 nano .env
-```
-
-`.env`에서 최소한 아래 두 값을 넣습니다.
-
-```text
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_ALLOWED_CHAT_IDS=...
-```
-
-그 다음:
-
-```bash
 bash install.sh
 ```
 
-`install.sh`가 Docker/Compose 확인 → `.env`/`data/` 준비 → compose 검증 → 이미지 build → 컨테이너 실행까지 수행합니다. 기존 `data/flight_bot.db`는 삭제·초기화하지 않습니다. IATA 카탈로그도 Docker 이미지 안에 함께 설치되므로 별도 파일 다운로드가 필요 없습니다.
-
-직접 실행하려면:
+직접 재배포:
 
 ```bash
 docker compose up -d --build
@@ -184,7 +205,9 @@ docker compose logs -f flight-bot
 curl http://127.0.0.1:8080/health
 ```
 
-### SQLite DB 보존 방식
+실제 포트는 `.env`의 `HTTP_PORT`를 따릅니다. 현재 홈서버 운영값은 `8081`입니다.
+
+## SQLite DB 보존 — 중요
 
 Compose는 Docker named volume이 아니라 **호스트 bind mount**를 사용합니다.
 
@@ -193,20 +216,26 @@ volumes:
   - ./data:/data
 ```
 
-컨테이너 안의 DB 경로는 `/data/flight_bot.db`, 호스트에서는 `<repo>/data/flight_bot.db`입니다. 홈서버 repo가 `/data/flight-bot`이라면 실제 DB는:
+컨테이너 DB:
+
+```text
+/data/flight_bot.db
+```
+
+홈서버 repo `/data/flight-bot` 기준 실제 DB:
 
 ```text
 /data/flight-bot/data/flight_bot.db
 ```
 
-`docker compose up -d --build`, 컨테이너 recreate, 이미지 rebuild를 해도 이 호스트 파일은 그대로 유지됩니다. **운영 중 `data/` 또는 `data/flight_bot.db`를 삭제하지 마십시오.**
+`docker compose up -d --build`, image rebuild, container recreate를 해도 이 호스트 DB를 유지합니다. **`data/` 또는 `data/flight_bot.db`를 삭제/초기화하지 마십시오.**
 
-이전 named-volume 배포에서 업그레이드하는 경우 기존 named volume 자체는 자동 삭제되지 않지만, bind mount로 전환하기 전에 DB를 `./data/flight_bot.db`로 옮겨야 기존 데이터가 이어집니다. 현재 홈서버는 이미 bind mount 경로로 전환되어 있습니다.
+v0.6 DB 변경은 기존 DB를 재생성하지 않고 additive migration으로 `slot_no`, `origin_type`, `destination_type`을 추가/backfill합니다. 기존 offer/search/alert history와 내부 slot PK는 유지합니다.
 
 ## 주요 설정
 
 ```text
-SLOT_ACTIVE_LIMIT=20
+SLOT_ACTIVE_LIMIT=20        # 채팅방마다 적용
 SEARCH_INTERVAL_HOURS=2
 DAILY_SUMMARY_HOUR=8
 ALERT_MAX_OFFERS=5
@@ -215,11 +244,11 @@ NAVER_API_ATTEMPTS=3
 NAVER_MIN_REQUEST_INTERVAL_SECONDS=3
 ```
 
-20개 슬롯을 순차 조회해도 Provider 내부 request lock과 최소 요청 간격으로 과도한 동시 요청을 만들지 않습니다. 바로 검색 역시 같은 요청 제어를 통과합니다.
+Provider 내부 request lock과 최소 요청 간격으로 여러 그룹/슬롯 검색도 한꺼번에 폭주하지 않도록 직렬화합니다.
 
 ## HTTP 관리 엔드포인트
 
-`ADMIN_SECRET`을 설정했을 때만 활성화됩니다. `X-Flight-Bot-Secret` 헤더가 필요합니다.
+`ADMIN_SECRET`을 설정했을 때만 활성화됩니다.
 
 ```text
 GET  /health
@@ -231,25 +260,16 @@ POST /admin/daily-summary/{slot_id}
 POST /kakao/skill
 ```
 
-`/admin/search`도 슬롯을 생성하지 않는 1회 검색이며 `SEL`, `TYO` 같은 지원 도시 코드도 사용할 수 있습니다.
-
-`/health`의 v0.5 핵심 플래그:
+`/health`의 v0.6 핵심 플래그:
 
 ```text
-version=0.5.0
+version=0.6.0
+slot_limit_scope=per-conversation
 city_search_enabled=true
+worldwide_location_search_enabled=true
+multilingual_location_search_enabled=true
 iata_validation_enabled=true
-daily_summary_mode=one-message-per-user
-```
-
-## Windows 실조회 테스트
-
-`flight-bot - test win` 폴더에서:
-
-```text
-01-setup-and-unit-test.cmd
-02-NAVER-flight-test.bat
-03-NAVER-TELEGRAM-E2E.bat
+daily_summary_mode=one-message-per-conversation
 ```
 
 ## 개발/CI 검증
@@ -261,8 +281,8 @@ python -m compileall -q src scripts tests
 docker build -t flight-bot:test .
 ```
 
-CI는 전체 단위/통합 테스트, 실제 IATA/도시 검색 계약, FastAPI 엔드포인트, Telegram 요약 버튼, 브라우저 자동화 의존성 부재, Docker build, **실제 Compose 기동 + `/health` + bind-mounted SQLite 파일 보존**을 검증합니다.
+CI는 Linux 전체 테스트, Windows Naver SSE harness, DB additive migration/그룹별 20슬롯, multilingual 위치 검색, Telegram UI, Docker build, 실제 Compose `/health`, bind-mounted SQLite 보존을 검증합니다.
 
 ## 운영 경계
 
-예약/결제 페이지 이동이나 외부 판매처 checkout 최종가격 검증은 현재 범위 밖입니다. Naver 내부 API 구조가 변경되면 SSE 요청/응답 계약을 다시 검증해야 하며 DOM fallback은 두지 않습니다.
+예약/결제 페이지 이동과 외부 판매처 checkout 최종가격 검증은 범위 밖입니다. Naver Flights SSE는 비공개 내부 인터페이스이므로 upstream 요청/응답 구조가 변경되면 live probe로 재검증해야 합니다. DOM/Playwright fallback은 두지 않습니다.

@@ -11,6 +11,23 @@ from .models import ALERT_ARMED, ALERTED, FlightOffer, WatchSlot
 
 DEFAULT_ACTIVE_SLOT_LIMIT = SLOT_DESIGN_CAPACITY
 
+# These were the only metropolitan codes that older releases could persist.
+# They are used only to backfill explicit location types during the additive
+# SQLite migration; new rows store the type selected by the user directly.
+LEGACY_CITY_CODES = {
+    "SEL",
+    "TYO",
+    "OSA",
+    "SPK",
+    "NYC",
+    "LON",
+    "PAR",
+    "ROM",
+    "MIL",
+    "WAS",
+    "BJS",
+}
+
 
 class StaleSlotError(RuntimeError):
     """A search finished for a slot generation/revision that no longer exists."""
@@ -21,8 +38,11 @@ CREATE TABLE IF NOT EXISTS watch_slots (
   id INTEGER PRIMARY KEY,
   owner_platform TEXT NOT NULL,
   owner_id TEXT NOT NULL,
+  slot_no INTEGER NOT NULL,
   origin TEXT NOT NULL,
+  origin_type TEXT NOT NULL DEFAULT 'airport',
   destination TEXT NOT NULL,
+  destination_type TEXT NOT NULL DEFAULT 'airport',
   depart_date TEXT NOT NULL,
   return_date TEXT NOT NULL,
   nonstop INTEGER NOT NULL DEFAULT 0,
@@ -124,9 +144,33 @@ class Database:
     def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
         return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
+    @staticmethod
+    def _backfill_owner_slot_numbers(conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            "SELECT id, owner_platform, owner_id, slot_no FROM watch_slots "
+            "ORDER BY owner_platform, owner_id, id"
+        ).fetchall()
+        used: dict[tuple[str, str], set[int]] = {}
+        for row in rows:
+            owner = (str(row["owner_platform"]), str(row["owner_id"]))
+            owner_used = used.setdefault(owner, set())
+            current = row["slot_no"]
+            current_no = int(current) if current is not None else 0
+            if current_no > 0 and current_no not in owner_used:
+                owner_used.add(current_no)
+                continue
+            slot_no = 1
+            while slot_no in owner_used:
+                slot_no += 1
+            conn.execute("UPDATE watch_slots SET slot_no=? WHERE id=?", (slot_no, int(row["id"])))
+            owner_used.add(slot_no)
+
     def _migrate_legacy(self, conn: sqlite3.Connection) -> None:
         watch_columns = self._columns(conn, "watch_slots")
         watch_additions = {
+            "slot_no": "INTEGER",
+            "origin_type": "TEXT NOT NULL DEFAULT 'airport'",
+            "destination_type": "TEXT NOT NULL DEFAULT 'airport'",
             "target_price": "INTEGER NOT NULL DEFAULT 0",
             "alert_state": "TEXT NOT NULL DEFAULT 'ARMED'",
             "last_observed_price": "INTEGER",
@@ -142,6 +186,35 @@ class Database:
         for name, ddl in watch_additions.items():
             if name not in watch_columns:
                 conn.execute(f"ALTER TABLE watch_slots ADD COLUMN {name} {ddl}")
+
+        self._backfill_owner_slot_numbers(conn)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_watch_owner_slot_no "
+            "ON watch_slots(owner_platform, owner_id, slot_no)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_watch_owner_enabled "
+            "ON watch_slots(owner_platform, owner_id, enabled, slot_no)"
+        )
+
+        placeholders = ",".join("?" for _ in LEGACY_CITY_CODES)
+        legacy_codes = tuple(sorted(LEGACY_CITY_CODES))
+        conn.execute(
+            f"UPDATE watch_slots SET origin_type='city' WHERE upper(origin) IN ({placeholders})",
+            legacy_codes,
+        )
+        conn.execute(
+            f"UPDATE watch_slots SET destination_type='city' WHERE upper(destination) IN ({placeholders})",
+            legacy_codes,
+        )
+        conn.execute(
+            "UPDATE watch_slots SET origin_type='airport' "
+            "WHERE origin_type IS NULL OR origin_type NOT IN ('airport','city')"
+        )
+        conn.execute(
+            "UPDATE watch_slots SET destination_type='airport' "
+            "WHERE destination_type IS NULL OR destination_type NOT IN ('airport','city')"
+        )
         conn.execute(
             "UPDATE watch_slots SET generation=lower(hex(randomblob(16))) WHERE generation IS NULL OR generation=''"
         )
@@ -192,6 +265,9 @@ class Database:
             checked_bag=row["checked_bag"],
             enabled=bool(row["enabled"]),
             target_price=row["target_price"],
+            slot_no=int(row["slot_no"] or 0),
+            origin_type=str(row["origin_type"] or "airport"),
+            destination_type=str(row["destination_type"] or "airport"),
             alert_state=row["alert_state"],
             last_observed_price=row["last_observed_price"],
             lowest_observed_price=row["lowest_observed_price"],
@@ -203,15 +279,6 @@ class Database:
             generation=str(row["generation"] or ""),
             revision=int(row["revision"] or 1),
         )
-
-    def _occupied_ids(self, conn: sqlite3.Connection) -> set[int]:
-        return {
-            row[0]
-            for row in conn.execute(
-                "SELECT id FROM watch_slots WHERE id BETWEEN 1 AND ?",
-                (SLOT_DESIGN_CAPACITY,),
-            )
-        }
 
     def add_slot(
         self,
@@ -225,34 +292,48 @@ class Database:
         target_price: int,
         nonstop: bool,
         checked_bag: int,
+        origin_type: str = "airport",
+        destination_type: str = "airport",
     ) -> WatchSlot:
         if target_price <= 0:
             raise ValueError("목표가는 0원보다 커야 합니다.")
         origin = origin.strip().upper()
         destination = destination.strip().upper()
         if not origin or not destination or origin == destination:
-            raise ValueError("출발지와 도착지를 서로 다른 공항 코드로 입력해 주세요.")
+            raise ValueError("출발지와 도착지를 서로 다른 공항/도시 코드로 입력해 주세요.")
+        if origin_type not in {"airport", "city"} or destination_type not in {"airport", "city"}:
+            raise ValueError("위치 유형은 airport 또는 city 이어야 합니다.")
+
         now = datetime.now(timezone.utc).isoformat()
         generation = uuid4().hex
         with self.connect() as conn:
-            occupied = self._occupied_ids(conn)
-            slot_id = next((idx for idx in range(1, self.slot_limit + 1) if idx not in occupied), None)
-            if slot_id is None:
+            occupied = {
+                int(row[0])
+                for row in conn.execute(
+                    "SELECT slot_no FROM watch_slots WHERE owner_platform=? AND owner_id=?",
+                    (platform, owner_id),
+                ).fetchall()
+                if row[0] is not None
+            }
+            slot_no = next((idx for idx in range(1, self.slot_limit + 1) if idx not in occupied), None)
+            if slot_no is None:
                 raise ValueError(
-                    f"감시 슬롯 {self.slot_limit}개가 모두 사용 중입니다. 기존 슬롯을 삭제해 주세요."
+                    f"이 대화의 감시 슬롯 {self.slot_limit}개가 모두 사용 중입니다. 기존 슬롯을 삭제해 주세요."
                 )
-            conn.execute(
+            cur = conn.execute(
                 """INSERT INTO watch_slots
-                (id, owner_platform, owner_id, origin, destination, depart_date, return_date,
-                 nonstop, checked_bag, enabled, target_price, alert_state, generation, revision,
-                 created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?)""",
+                (owner_platform, owner_id, slot_no, origin, origin_type, destination, destination_type,
+                 depart_date, return_date, nonstop, checked_bag, enabled, target_price, alert_state,
+                 generation, revision, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?)""",
                 (
-                    slot_id,
                     platform,
                     owner_id,
+                    slot_no,
                     origin,
+                    origin_type,
                     destination,
+                    destination_type,
                     depart_date,
                     return_date,
                     int(nonstop),
@@ -264,7 +345,8 @@ class Database:
                     now,
                 ),
             )
-            row = conn.execute("SELECT * FROM watch_slots WHERE id=?", (slot_id,)).fetchone()
+            internal_id = int(cur.lastrowid)
+            row = conn.execute("SELECT * FROM watch_slots WHERE id=?", (internal_id,)).fetchone()
         return self._slot(row)
 
     def list_slots(
@@ -275,8 +357,8 @@ class Database:
         owner_id: str | None = None,
     ) -> list[WatchSlot]:
         with self.connect() as conn:
-            sql = "SELECT * FROM watch_slots WHERE id BETWEEN 1 AND ?"
-            params: list[object] = [SLOT_DESIGN_CAPACITY]
+            sql = "SELECT * FROM watch_slots WHERE 1=1"
+            params: list[object] = []
             if enabled_only:
                 sql += " AND enabled=1"
             if owner_platform is not None:
@@ -285,15 +367,18 @@ class Database:
             if owner_id is not None:
                 sql += " AND owner_id=?"
                 params.append(owner_id)
-            sql += " ORDER BY id"
+            if owner_platform is not None and owner_id is not None:
+                sql += " ORDER BY slot_no, id"
+            else:
+                sql += " ORDER BY id"
             rows = conn.execute(sql, params).fetchall()
         return [self._slot(row) for row in rows]
 
     def get_slot(self, slot_id: int) -> WatchSlot | None:
-        if not 1 <= int(slot_id) <= SLOT_DESIGN_CAPACITY:
+        if int(slot_id) <= 0:
             return None
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM watch_slots WHERE id=?", (slot_id,)).fetchone()
+            row = conn.execute("SELECT * FROM watch_slots WHERE id=?", (int(slot_id),)).fetchone()
         return self._slot(row) if row else None
 
     def get_owned_slot(self, slot_id: int, platform: str, owner_id: str) -> WatchSlot | None:
@@ -304,6 +389,16 @@ class Database:
             return None
         return slot
 
+    def get_owned_slot_by_no(self, slot_no: int, platform: str, owner_id: str) -> WatchSlot | None:
+        if not 1 <= int(slot_no) <= self.slot_limit:
+            return None
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM watch_slots WHERE owner_platform=? AND owner_id=? AND slot_no=?",
+                (platform, owner_id, int(slot_no)),
+            ).fetchone()
+        return self._slot(row) if row else None
+
     def set_enabled(self, slot_id: int, enabled: bool) -> None:
         with self.connect() as conn:
             cur = conn.execute(
@@ -311,7 +406,7 @@ class Database:
                 (int(enabled), datetime.now(timezone.utc).isoformat(), slot_id),
             )
             if cur.rowcount == 0:
-                raise ValueError(f"슬롯 #{slot_id}을 찾을 수 없습니다.")
+                raise ValueError(f"슬롯을 찾을 수 없습니다.")
 
     def set_target(self, slot_id: int, target_price: int) -> None:
         if target_price <= 0:
@@ -324,7 +419,7 @@ class Database:
                 (target_price, ALERT_ARMED, datetime.now(timezone.utc).isoformat(), slot_id),
             )
             if cur.rowcount == 0:
-                raise ValueError(f"슬롯 #{slot_id}을 찾을 수 없습니다.")
+                raise ValueError("슬롯을 찾을 수 없습니다.")
 
     def delete_slot(self, slot_id: int) -> None:
         with self.connect() as conn:
@@ -333,7 +428,7 @@ class Database:
             conn.execute("DELETE FROM search_runs_v2 WHERE slot_id=?", (slot_id,))
             cur = conn.execute("DELETE FROM watch_slots WHERE id=?", (slot_id,))
             if cur.rowcount == 0:
-                raise ValueError(f"슬롯 #{slot_id}을 찾을 수 없습니다.")
+                raise ValueError("슬롯을 찾을 수 없습니다.")
 
     def start_search(self, slot_id: int, provider: str) -> int:
         now = datetime.now(timezone.utc).isoformat()
