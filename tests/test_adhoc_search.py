@@ -60,7 +60,7 @@ async def test_search_now_does_not_create_a_watch_slot(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_search_command_and_question_mark_help(tmp_path):
+async def test_search_command_stays_compatible_but_help_is_button_first(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     service = FlightService(Settings(_env_file=None), db, provider=FakeSearchProvider())
 
@@ -69,7 +69,9 @@ async def test_search_command_and_question_mark_help(tmp_path):
 
     assert "319,620KRW" in result
     assert "바로 검색" in help_text
-    assert "최대 20개 슬롯" in help_text
+    assert "채팅방마다" in help_text
+    assert "20개" in help_text
+    assert "/flight search" not in help_text
 
 
 @pytest.mark.asyncio
