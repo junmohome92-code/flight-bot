@@ -18,8 +18,10 @@ class ProviderError(RuntimeError):
 class NaverFlightsSSEProvider:
     """Production direct round-trip provider backed by Naver Flights SSE.
 
-    Supports both airport codes (for example ICN) and metropolitan city codes
-    (for example SEL/TYO). It never launches a browser or parses DOM/CSS.
+    Supports both airport codes and metropolitan city codes. New slots persist
+    the selected location type explicitly; legacy/ad-hoc callers can still fall
+    back to deterministic code inference. The provider never launches a browser
+    or parses DOM/CSS.
     """
 
     name = "naver-flights-sse"
@@ -40,13 +42,17 @@ class NaverFlightsSSEProvider:
             await asyncio.sleep(interval - elapsed)
         self._last_request_started = time.monotonic()
 
+    @staticmethod
+    def _slot_location_type(value: str, stored_type: str) -> str:
+        return stored_type if stored_type in {"airport", "city"} else location_type(value)
+
     async def search(self, slot: WatchSlot, *, verify_below_price: int | None = None) -> FlightOffer:
         del verify_below_price  # Checkout verification is outside the current product scope.
         if not slot.return_date:
             raise ProviderError("Naver provider requires a round-trip return date")
 
-        origin_type = location_type(slot.origin)
-        destination_type = location_type(slot.destination)
+        origin_type = self._slot_location_type(slot.origin, slot.origin_type)
+        destination_type = self._slot_location_type(slot.destination, slot.destination_type)
         try:
             async with self._request_lock:
                 await self._respect_request_interval()
