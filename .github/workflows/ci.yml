@@ -89,8 +89,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install Windows contract test dependency
-        run: python -m pip install pytest==8.4.2
+      - name: Install project and Windows contract tests
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -c constraints.txt -e '.[dev]'
       - name: Compile browserless Naver scripts
         run: python -m compileall -q src scripts tests/test_provider_poc.py tests/test_windows_test_harness.py
       - name: Run Naver SSE and Windows launcher contracts
