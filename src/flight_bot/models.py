@@ -23,6 +23,12 @@ class WatchSlot:
     checked_bag: int
     enabled: bool
     target_price: int
+    # Human-facing slot number is scoped to one conversation. ``id`` remains
+    # the internal database primary key so existing rows can be migrated
+    # without rewriting foreign keys/history tables.
+    slot_no: int = 0
+    origin_type: str = "airport"
+    destination_type: str = "airport"
     alert_state: str = ALERT_ARMED
     last_observed_price: int | None = None
     lowest_observed_price: int | None = None
