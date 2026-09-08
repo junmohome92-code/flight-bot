@@ -5,7 +5,7 @@ description = "Self-hosted Naver Flights SSE price monitor"
 requires-python = ">=3.12"
 dependencies = [
   "airportsdata>=20260905",
-  "airportsearch>=0.1,<0.2",
+  "airportsearch @ https://github.com/bgokden/airportsearch/archive/74ee42e242837ad247f9c94aa56bde184fa96dbf.zip",
   "apscheduler>=3.10,<4",
   "discord.py>=2.5,<3",
   "fastapi>=0.116,<1",
