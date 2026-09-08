@@ -58,14 +58,17 @@ jobs:
           for i in {1..30}; do
             if curl --fail --silent http://127.0.0.1:8080/health > /tmp/health.json; then
               cat /tmp/health.json
-              grep -q '"version":"0.5.0"' /tmp/health.json
+              grep -q '"version":"0.6.0"' /tmp/health.json
               grep -q '"provider":"naver-flights-sse"' /tmp/health.json
               grep -q '"browser_required":false' /tmp/health.json
               grep -q '"slots_max":20' /tmp/health.json
+              grep -q '"slot_limit_scope":"per-conversation"' /tmp/health.json
               grep -q '"ad_hoc_search_enabled":true' /tmp/health.json
               grep -q '"city_search_enabled":true' /tmp/health.json
+              grep -q '"worldwide_location_search_enabled":true' /tmp/health.json
+              grep -q '"multilingual_location_search_enabled":true' /tmp/health.json
               grep -q '"iata_validation_enabled":true' /tmp/health.json
-              grep -q '"daily_summary_mode":"one-message-per-user"' /tmp/health.json
+              grep -q '"daily_summary_mode":"one-message-per-conversation"' /tmp/health.json
               test -f data/.ci-persistence-marker
               test -f data/flight_bot.db
               docker compose down
